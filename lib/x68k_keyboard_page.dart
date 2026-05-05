@@ -69,8 +69,13 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
   // キーリピート (X68000 の SET REPEAT START / RATE コマンドで可変)
   Timer? _repeatTimer;
   int? _repeatScancode;
-  int _repeatDelayMs = 500;     // 0x60-0x6F: 200 + n*100 ms (default n=3)
-  int _repeatIntervalMs = 110;  // 0x70-0x7F: 30 + n²*5 ms (default n=4)
+  int _repeatDelayMs = 500;     // 0b0110dddd: 200 + dddd*100 ms (default dddd=3)
+  int _repeatIntervalMs = 110;  // 0b0111rrrr: 30 + rrrr²*5 ms (default rrrr=4)
+
+  // LED 輝度 (0b010101xx: xx=00 最も明るい, xx=11 最も暗い)
+  // xx=00 → factor 1.0, xx=11 → factor 0.25
+  int _ledBrightness = 0;
+  static const List<double> _brightnessFactors = [1.0, 0.7, 0.45, 0.25];
 
   // ポップアップで使う基本ユニットサイズ (LayoutBuilder で更新)
   double _h = 0;
@@ -117,18 +122,24 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
       return;
     }
     if ((byte & 0xF0) == 0x60) {
-      // キーリピート開始遅延 (200 + n × 100 ms)
+      // 0b0110dddd: キーリピート開始遅延 (200 + dddd × 100 ms)
       final n = byte & 0x0F;
       _repeatDelayMs = 200 + n * 100;
       return;
     }
     if ((byte & 0xF0) == 0x70) {
-      // キーリピート間隔 (30 + n² × 5 ms)
+      // 0b0111rrrr: キーリピート間隔 (30 + rrrr² × 5 ms)
       final n = byte & 0x0F;
       _repeatIntervalMs = 30 + n * n * 5;
       return;
     }
-    // 0x54-0x57: LED 輝度 (未対応)
+    if ((byte & 0xFC) == 0x54) {
+      // 0b010101xx: LED 輝度 (xx=00 最も明るい, xx=11 最も暗い)
+      setState(() {
+        _ledBrightness = byte & 0x03;
+      });
+      return;
+    }
   }
 
   void _press(int code) {
@@ -172,6 +183,8 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
           return;
         }
         widget.midi.sendNoteOn(widget.channel, code, 127);
+        // リピートのたびに軽い触覚フィードバック
+        HapticFeedback.selectionClick();
       },
     );
   }
@@ -336,7 +349,7 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
       cursorSumU: 3,
       numpad: [
         _key('CAPS', 0x5D, u, h),
-        _keyMulti(['記号入力'], 0x52, u, h),
+        _keyMulti(['記号', '入力'], 0x52, u, h),
         _keyMulti(['登録'], 0x53, u, h),
         _key('HELP', 0x54, u, h),
       ],
@@ -388,7 +401,7 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
       mainSumU: 1.1 + 13 + 1.4,
       cursor: [
         _key('HOME', 0x36, u, h),
-        _keyMulti(['INS', 'Home'], 0x5E, u, h),
+        _key('INS', 0x5E, u, h),
         _key('DEL', 0x37, u, h),
       ],
       cursorSumU: 3,
@@ -512,10 +525,11 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
       ],
       cursorSumU: 3,
       numpad: [
-        // 0 (2u), . (visible), , (ENTER に隠れる)
-        _key('0', 0x4F, u * 2, h),
-        _key('.', 0x51, u, h),
+        // 0 (1u), , (1u), . (1u), ENTER 領域 (1u, Stack で覆う)
+        _key('0', 0x4F, u, h),
         _key(',', 0x50, u, h),
+        _key('.', 0x51, u, h),
+        SizedBox(width: u),
       ],
       numpadSumU: 4,
     );
@@ -588,23 +602,32 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
                   ),
                   if (hasLed)
                     Positioned(
-                      top: 3,
-                      right: 3,
-                      child: Container(
-                        width: 6,
-                        height: 6,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: ledOn ? ledColor : ledColorDim,
-                          boxShadow: ledOn
-                              ? [
-                                  BoxShadow(
-                                    color: ledGlow,
-                                    blurRadius: 4,
-                                    spreadRadius: 0.5,
-                                  ),
-                                ]
-                              : null,
+                      left: 0,
+                      right: 0,
+                      bottom: 0,
+                      child: Center(
+                        child: Container(
+                          // キー下端にぴったり付いた LED バー (実機の LED 表示風)
+                          width: width * 0.5,
+                          height: 6,
+                          decoration: BoxDecoration(
+                            color: ledOn
+                                ? _applyBrightness(ledColor, _ledBrightness)
+                                : ledColorDim,
+                            borderRadius: const BorderRadius.only(
+                              topLeft: Radius.circular(1),
+                              topRight: Radius.circular(1),
+                            ),
+                            boxShadow: ledOn
+                                ? [
+                                    BoxShadow(
+                                      color: _applyBrightness(ledGlow, _ledBrightness),
+                                      blurRadius: 5,
+                                      spreadRadius: 0.5,
+                                    ),
+                                  ]
+                                : null,
+                          ),
                         ),
                       ),
                     ),
@@ -659,6 +682,16 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
           ),
         ),
       ),
+    );
+  }
+
+  // 輝度レベル (0=最も明るい, 3=最も暗い) を RGB に乗算 (alpha は維持)
+  Color _applyBrightness(Color base, int level) {
+    final f = _brightnessFactors[level.clamp(0, _brightnessFactors.length - 1)];
+    return base.withValues(
+      red: (base.r * f).clamp(0.0, 1.0),
+      green: (base.g * f).clamp(0.0, 1.0),
+      blue: (base.b * f).clamp(0.0, 1.0),
     );
   }
 
