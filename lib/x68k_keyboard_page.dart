@@ -57,8 +57,8 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
   // ひらがな・全角は緑、それ以外 (かな/ローマ字/コード入力/CAPS/INS) は赤
   static const Set<int> _greenLedScancodes = {0x5F, 0x60};
 
-  // X68000 JIS かな配列: かな LED 点灯時にこのラベルでキー表示を上書き
-  static const Map<int, String> _kanaLabels = {
+  // X68000 JIS かな配列: かな ON + ひらがな ON のとき表示
+  static const Map<int, String> _hiraganaLabels = {
     0x02: 'ぬ', 0x03: 'ふ', 0x04: 'あ', 0x05: 'う', 0x06: 'え',
     0x07: 'お', 0x08: 'や', 0x09: 'ゆ', 0x0A: 'よ', 0x0B: 'わ',
     0x0C: 'ほ', 0x0D: 'へ', 0x0E: 'ー',
@@ -73,11 +73,53 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
     0x34: 'ろ',
   };
 
+  // かな ON + ひらがな OFF のとき表示するカタカナラベル
+  static const Map<int, String> _katakanaLabels = {
+    0x02: 'ヌ', 0x03: 'フ', 0x04: 'ア', 0x05: 'ウ', 0x06: 'エ',
+    0x07: 'オ', 0x08: 'ヤ', 0x09: 'ユ', 0x0A: 'ヨ', 0x0B: 'ワ',
+    0x0C: 'ホ', 0x0D: 'ヘ', 0x0E: 'ー',
+    0x11: 'タ', 0x12: 'テ', 0x13: 'イ', 0x14: 'ス', 0x15: 'カ',
+    0x16: 'ン', 0x17: 'ナ', 0x18: 'ニ', 0x19: 'ラ', 0x1A: 'セ',
+    0x1B: '゛', 0x1C: '゜',
+    0x1E: 'チ', 0x1F: 'ト', 0x20: 'シ', 0x21: 'ハ', 0x22: 'キ',
+    0x23: 'ク', 0x24: 'マ', 0x25: 'ノ', 0x26: 'リ', 0x27: 'レ',
+    0x28: 'ケ', 0x29: 'ム',
+    0x2A: 'ツ', 0x2B: 'サ', 0x2C: 'ソ', 0x2D: 'ヒ', 0x2E: 'コ',
+    0x2F: 'ミ', 0x30: 'モ', 0x31: 'ネ', 0x32: 'ル', 0x33: 'メ',
+    0x34: 'ロ',
+  };
+
+  // かな OFF + SHIFT 押下時に表示する記号 (X68000 JIS 配列)
+  static const Map<int, String> _shiftLabels = {
+    0x02: '!',  0x03: '"',  0x04: '#',  0x05: '\$', 0x06: '%',
+    0x07: '&',  0x08: '\'', 0x09: '(',  0x0A: ')',
+    0x0C: '=',  0x0D: '~',  0x0E: '|',
+    0x31: '<',  0x32: '>',  0x33: '?',
+  };
+
   // キーリピート (X68000 の SET REPEAT START / RATE コマンドで可変)
   Timer? _repeatTimer;
   int? _repeatScancode;
   int _repeatDelayMs = 500;     // 0b0110dddd: 200 + dddd*100 ms (default dddd=3)
   int _repeatIntervalMs = 110;  // 0b0111rrrr: 30 + rrrr²*5 ms (default rrrr=4)
+
+  // リピートさせないキー (モディファイア / LED トグル系)
+  //   0x5A: かな        0x5B: ローマ字    0x5C: コード入力
+  //   0x5D: CAPS        0x5E: INS         0x5F: ひらがな   0x60: 全角
+  //   0x70: SHIFT       0x71: CTRL        0x72: OPT.1      0x73: OPT.2
+  static const Set<int> _noRepeatScancodes = {
+    0x5A, 0x5B, 0x5C, 0x5D, 0x5E, 0x5F, 0x60,
+    0x70, 0x71, 0x72, 0x73,
+  };
+
+  // 押下ポップアップの表示制御。短いタップでも一定時間は表示しておく
+  static const Duration _popupMinShow = Duration(milliseconds: 250);
+  // 連打時に「一旦消えて再表示」して視覚的にカウントできるようにするための短い間
+  static const Duration _popupBlinkGap = Duration(milliseconds: 30);
+  final Map<int, Timer> _popupHideTimers = {};
+  Timer? _popupShowTimer;
+  // ポップアップは Overlay にエントリを差し込んで AppBar 含む最上層に描画する
+  final Map<int, OverlayEntry> _popupOverlays = {};
 
   // LED 輝度 (0b010101xx: xx=00 最も明るい, xx=11 最も暗い)
   // xx=00 → factor 1.0, xx=11 → factor 0.25
@@ -105,6 +147,15 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
   @override
   void dispose() {
     _repeatTimer?.cancel();
+    _popupShowTimer?.cancel();
+    for (final t in _popupHideTimers.values) {
+      t.cancel();
+    }
+    _popupHideTimers.clear();
+    for (final entry in _popupOverlays.values) {
+      entry.remove();
+    }
+    _popupOverlays.clear();
     widget.midi.onTargetRx = _prevTargetRxHandler;
     super.dispose();
   }
@@ -149,13 +200,29 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
     }
   }
 
-  void _press(int code) {
+  void _press(int code, BuildContext keyCtx, List<String> labels) {
     if (_pressed.add(code)) {
       widget.midi.sendNoteOn(widget.channel, code, 127);
       HapticFeedback.lightImpact();
-      _scheduleRepeat(code);
-      setState(() {});
+      if (!_noRepeatScancodes.contains(code)) {
+        _scheduleRepeat(code);
+      }
     }
+    // 別キー/同キーのいずれの再押下でも、まず既存ポップアップを即時消す
+    // (連打時に "ポン・ポン" と分かれて見えるように)
+    _popupShowTimer?.cancel();
+    for (final t in _popupHideTimers.values) {
+      t.cancel();
+    }
+    _popupHideTimers.clear();
+    _hideAllPopupOverlays();
+    setState(() {});
+
+    // ごく短い間ブランクにしてから今回の押下キーを表示
+    _popupShowTimer = Timer(_popupBlinkGap, () {
+      if (!mounted) return;
+      _showPopupOverlay(code, keyCtx, labels);
+    });
   }
 
   void _release(int code) {
@@ -165,8 +232,81 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
         _repeatScancode = null;
       }
       widget.midi.sendNoteOff(widget.channel, code);
-      setState(() {});
     }
+    // 短いタップでも吹き出しが視認できるよう、最低表示時間後に消す
+    _popupHideTimers.remove(code)?.cancel();
+    _popupHideTimers[code] = Timer(_popupMinShow, () {
+      if (!mounted) return;
+      _popupOverlays.remove(code)?.remove();
+      _popupHideTimers.remove(code);
+    });
+    setState(() {});
+  }
+
+  void _hideAllPopupOverlays() {
+    for (final entry in _popupOverlays.values) {
+      entry.remove();
+    }
+    _popupOverlays.clear();
+  }
+
+  // OverlayEntry を挿入してキー上方に吹き出しを描画する。
+  // Overlay は Scaffold (AppBar 含む) の上に描画されるので、最上段キーでも隠れない。
+  void _showPopupOverlay(int scancode, BuildContext keyCtx, List<String> labels) {
+    if (!mounted) return;
+    final box = keyCtx.findRenderObject();
+    if (box is! RenderBox || !box.attached) return;
+
+    final origin = box.localToGlobal(Offset.zero);
+    final keySize = box.size;
+
+    final popupH = (_h > 0 ? _h : 40) * 1.1;
+    final popupW = (keySize.width * 1.2).clamp(popupH, double.infinity);
+
+    final left = origin.dx + (keySize.width - popupW) / 2;
+    final top = origin.dy - popupH - 6;
+
+    final entry = OverlayEntry(
+      builder: (ctx) => Positioned(
+        left: left,
+        top: top,
+        width: popupW,
+        height: popupH,
+        child: IgnorePointer(child: _popupContent(labels, popupW, popupH)),
+      ),
+    );
+    Overlay.of(context, rootOverlay: true).insert(entry);
+    _popupOverlays[scancode] = entry;
+  }
+
+  Widget _popupContent(List<String> labels, double w, double h) {
+    return Container(
+      decoration: BoxDecoration(
+        color: const Color(0xFF3399FF),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.white, width: 1.5),
+        boxShadow: const [
+          BoxShadow(color: Colors.black54, blurRadius: 6, offset: Offset(0, 3)),
+        ],
+      ),
+      child: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: labels
+              .map((s) => Text(
+                    s,
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.bold,
+                      fontSize: _autoFontSize(s, w, h) * 1.2,
+                      height: 1.0,
+                    ),
+                  ))
+              .toList(),
+        ),
+      ),
+    );
   }
 
   // 押下から _repeatDelayMs 経過したらリピート開始
@@ -222,16 +362,23 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
         child: LayoutBuilder(
           builder: (context, constraints) {
             final showTrackpad = hasMouse && _trackpadVisible;
-            final keyboardArea = _buildKeyboard(constraints);
-            if (!showTrackpad) return keyboardArea;
-            // トラックパッド領域は画面高さの約 30%、下限 130 / 上限 220
-            final trackpadH =
-                (constraints.maxHeight * 0.3).clamp(130.0, 220.0);
+            if (!showTrackpad) {
+              return _buildKeyboard(constraints);
+            }
+            // トラックパッドの最小高 (これ以上は確保する)
+            const trackpadMinH = 100.0;
+            // キーボードに与えられる最大高さ
+            final maxKbH =
+                (constraints.maxHeight - trackpadMinH).clamp(0.0, double.infinity);
+            // キーボードは幅でも高さでもはみ出さないよう u を計算
+            final keyboard = _buildKeyboard(BoxConstraints(
+              maxWidth: constraints.maxWidth,
+              maxHeight: maxKbH,
+            ));
             return Column(
               children: [
-                Expanded(child: keyboardArea),
-                SizedBox(
-                  height: trackpadH,
+                keyboard,
+                Expanded(
                   child: _TrackpadArea(
                     midi: widget.midi,
                     channel: widget.mouseChannel!,
@@ -257,17 +404,34 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
       ? _mainAreaW + _gap + _cursorAreaW + _gap + _numpadAreaW
       : _mainAreaW + _gap + _cursorAreaW;
 
+  // キーボードの行構成: function row + 4 main rows + bottom row = 6 行 + fnGap(=0.15h)
+  // 合計コンテンツ高 = 6.15 * h = 6.15 * 0.95 * u = ~5.8425 * u
+  // パディング (innerPad * 2 = 16) を加えて keyboardH = 5.8425*u + 16
+  static const double _rowsPerH = 6.15;
+  static const double _hPerU = 0.95;
+
   Widget _buildKeyboard(BoxConstraints constraints) {
     // 各キーは declared width 内にパディングを内包するため、unit 計算は単純な分割で OK
     final outerPadding = 16.0;
-    final available = constraints.maxWidth - outerPadding;
-    final u = available / _totalW;
-    final h = u * 0.95;
+    final innerPad = 8.0;
+    final innerPadTotal = innerPad * 2;
+
+    final availableW = constraints.maxWidth - outerPadding;
+    final uByWidth = availableW / _totalW;
+    // 高さ制約があれば、それを超えないように u を制限する
+    double u = uByWidth;
+    if (constraints.maxHeight.isFinite) {
+      final availableH = constraints.maxHeight - innerPadTotal;
+      if (availableH > 0) {
+        final uByHeight = availableH / (_rowsPerH * _hPerU);
+        if (uByHeight < u) u = uByHeight;
+      }
+    }
+    final h = u * _hPerU;
     _h = h;  // ポップアップサイズ計算用に保存
 
     // 縦長キー (Return / numpad ENTER) を Stack で重ねるための位置計算
     // Y 位置: function row(h) + gap(0.15h) + 累積行
-    final innerPad = 8.0;
     final fnRowH = h;
     final fnGap = h * 0.15;
     final yRow1 = innerPad + fnRowH + fnGap;
@@ -290,14 +454,13 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
     final xRightCursor = xCursorAreaStart + u * 2;
     final yLeftRightCursor = yRow3 + h * 0.5;  // ↑ と ↓ の中間
 
-    return SingleChildScrollView(
-      clipBehavior: Clip.none,  // ポップアップが上方向にはみ出るのを許可
-      child: Stack(
-        clipBehavior: Clip.none,
-        children: [
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
           Padding(
             padding: EdgeInsets.all(innerPad),
             child: Column(
+              mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 _buildFunctionRow(u, h),
@@ -349,8 +512,7 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
                 child: _keyMulti(['ENTER'], 0x4E, u, h * 2),
               ),
             ),
-        ],
-      ),
+      ],
     );
   }
 
@@ -579,10 +741,24 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
     final ledOn = _ledOn.contains(scancode);
     final hasLed = _ledBitToScancode.contains(scancode);
 
-    // かな LED 点灯時はキー表示を JIS かなに置き換える
+    // 表示ラベル切替:
+    //   かな ON + ひらがな ON  → ひらがな
+    //   かな ON + ひらがな OFF → カタカナ
+    //   かな OFF + SHIFT       → JIS 記号 (1-0 段、,./)
+    //   それ以外               → 通常の英数記号
     final kanaActive = _ledOn.contains(0x5A);
-    final kanaLabel = kanaActive ? _kanaLabels[scancode] : null;
-    final displayLabels = kanaLabel != null ? <String>[kanaLabel] : labels;
+    final hiraganaActive = _ledOn.contains(0x5F);
+    final shiftPressed = _pressed.contains(0x70);
+    String? overrideLabel;
+    if (kanaActive) {
+      overrideLabel = hiraganaActive
+          ? _hiraganaLabels[scancode]
+          : _katakanaLabels[scancode];
+    } else if (shiftPressed) {
+      overrideLabel = _shiftLabels[scancode];
+    }
+    final displayLabels =
+        overrideLabel != null ? <String>[overrideLabel] : labels;
 
     // LED 色分け (緑: ひらがな/全角, 赤: それ以外)
     final isGreen = _greenLedScancodes.contains(scancode);
@@ -590,125 +766,77 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
     final ledColorDim = isGreen ? const Color(0xFF1a3a1a) : const Color(0xFF3a1414);
     final ledGlow = isGreen ? const Color(0x8866FF88) : const Color(0x88FF5555);
 
-    return SizedBox(
-      width: width,
-      height: height,
-      child: Stack(
-        clipBehavior: Clip.none,
-        children: [
-          // キー本体
-          Padding(
-            padding: const EdgeInsets.all(1.5),
-            child: GestureDetector(
-              onTapDown: (_) => _press(scancode),
-              onTapUp: (_) => _release(scancode),
-              onTapCancel: () => _release(scancode),
-              child: Stack(
-                children: [
-                  Container(
-                    decoration: BoxDecoration(
-                      color: pressed ? const Color(0xFF505050) : const Color(0xFF222222),
-                      borderRadius: BorderRadius.circular(4),
-                      border: Border.all(
-                        color: pressed ? Colors.white : const Color(0xFF555555),
-                        width: pressed ? 2 : 1,
-                      ),
+    // ポップアップは Overlay で描画するため、各キーの BuildContext を Builder で確保
+    return Builder(
+      builder: (keyCtx) => SizedBox(
+        width: width,
+        height: height,
+        child: Padding(
+          padding: const EdgeInsets.all(1.5),
+          child: GestureDetector(
+            onTapDown: (_) => _press(scancode, keyCtx, displayLabels),
+            onTapUp: (_) => _release(scancode),
+            onTapCancel: () => _release(scancode),
+            child: Stack(
+              children: [
+                Container(
+                  decoration: BoxDecoration(
+                    color: pressed ? const Color(0xFF505050) : const Color(0xFF222222),
+                    borderRadius: BorderRadius.circular(4),
+                    border: Border.all(
+                      color: pressed ? Colors.white : const Color(0xFF555555),
+                      width: pressed ? 2 : 1,
                     ),
+                  ),
+                  child: Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: displayLabels
+                          .map((s) => Text(
+                                s,
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                  color: pressed ? Colors.white : Colors.grey.shade300,
+                                  fontSize: _autoFontSize(s, width, height),
+                                  height: 1.0,
+                                ),
+                              ))
+                          .toList(),
+                    ),
+                  ),
+                ),
+                if (hasLed)
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
                     child: Center(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: displayLabels
-                            .map((s) => Text(
-                                  s,
-                                  textAlign: TextAlign.center,
-                                  style: TextStyle(
-                                    color: pressed ? Colors.white : Colors.grey.shade300,
-                                    fontSize: _autoFontSize(s, width, height),
-                                    height: 1.0,
+                      child: Container(
+                        // キー下端にぴったり付いた LED バー (実機の LED 表示風)
+                        width: width * 0.5,
+                        height: 6,
+                        decoration: BoxDecoration(
+                          color: ledOn
+                              ? _applyBrightness(ledColor, _ledBrightness)
+                              : ledColorDim,
+                          borderRadius: const BorderRadius.only(
+                            topLeft: Radius.circular(1),
+                            topRight: Radius.circular(1),
+                          ),
+                          boxShadow: ledOn
+                              ? [
+                                  BoxShadow(
+                                    color: _applyBrightness(ledGlow, _ledBrightness),
+                                    blurRadius: 5,
+                                    spreadRadius: 0.5,
                                   ),
-                                ))
-                            .toList(),
+                                ]
+                              : null,
+                        ),
                       ),
                     ),
                   ),
-                  if (hasLed)
-                    Positioned(
-                      left: 0,
-                      right: 0,
-                      bottom: 0,
-                      child: Center(
-                        child: Container(
-                          // キー下端にぴったり付いた LED バー (実機の LED 表示風)
-                          width: width * 0.5,
-                          height: 6,
-                          decoration: BoxDecoration(
-                            color: ledOn
-                                ? _applyBrightness(ledColor, _ledBrightness)
-                                : ledColorDim,
-                            borderRadius: const BorderRadius.only(
-                              topLeft: Radius.circular(1),
-                              topRight: Radius.circular(1),
-                            ),
-                            boxShadow: ledOn
-                                ? [
-                                    BoxShadow(
-                                      color: _applyBrightness(ledGlow, _ledBrightness),
-                                      blurRadius: 5,
-                                      spreadRadius: 0.5,
-                                    ),
-                                  ]
-                                : null,
-                          ),
-                        ),
-                      ),
-                    ),
-                ],
-              ),
-            ),
-          ),
-          // 押下時のポップアップ吹き出し (指で隠れたキーを上に表示)
-          if (pressed) _buildKeyPopup(displayLabels, width),
-        ],
-      ),
-    );
-  }
-
-  // 吹き出しを Positioned で上に重ねる
-  Widget _buildKeyPopup(List<String> labels, double keyWidth) {
-    final popupH = (_h > 0 ? _h : 40) * 1.1;
-    final popupW = keyWidth.clamp(popupH * 1.0, double.infinity) * 1.2;
-    return Positioned(
-      // キー中央を基準に水平センタリング
-      left: (keyWidth - popupW) / 2,
-      // キー上端からポップアップ高さ分 + 余白を上方向に
-      top: -(popupH + 6),
-      child: IgnorePointer(
-        child: Container(
-          width: popupW,
-          height: popupH,
-          decoration: BoxDecoration(
-            color: const Color(0xFF3399FF),
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: Colors.white, width: 1.5),
-            boxShadow: const [
-              BoxShadow(color: Colors.black54, blurRadius: 6, offset: Offset(0, 3)),
-            ],
-          ),
-          child: Center(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: labels
-                  .map((s) => Text(
-                        s,
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.bold,
-                          fontSize: _autoFontSize(s, popupW, popupH) * 1.2,
-                          height: 1.0,
-                        ),
-                      ))
-                  .toList(),
+              ],
             ),
           ),
         ),
