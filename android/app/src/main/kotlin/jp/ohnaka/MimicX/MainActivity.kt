@@ -1,4 +1,4 @@
-package jp.ohnaka.smart_retro_hid
+package jp.ohnaka.MimicX
 
 import io.flutter.embedding.android.FlutterActivity
 
