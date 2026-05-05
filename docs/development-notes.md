@@ -1,4 +1,4 @@
-# smart-retro-hid-app 開発メモ
+# MimicX-app 開発メモ
 
 ## 概要
 
@@ -10,7 +10,7 @@
 |------|------|
 | フレームワーク | Flutter (iOS / Android) |
 | USB-MIDI ライブラリ | `flutter_midi_command` (pub.dev) |
-| プロトコル | smart-retro-hid-protocol v0.1.0 |
+| プロトコル | MimicX-protocol v0.1.0 |
 
 ### flutter_midi_command について
 
