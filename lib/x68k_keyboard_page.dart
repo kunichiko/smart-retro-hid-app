@@ -14,10 +14,14 @@ class X68kKeyboardPage extends StatefulWidget {
   final MidiService midi;
   final int channel;
 
+  /// 同一デバイスがマウス機能も持つときの MIDI チャンネル。null ならトラックパッド非表示。
+  final int? mouseChannel;
+
   const X68kKeyboardPage({
     super.key,
     required this.midi,
     this.channel = MidiService.chKeyboardDefault,
+    this.mouseChannel,
   });
 
   @override
@@ -30,6 +34,9 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
 
   // テンキーを表示するか (オフだとメインキーが大きく表示される)
   bool _numpadVisible = true;
+
+  // トラックパッドを表示するか (mouseChannel が来てる時のみ意味を持つ)
+  bool _trackpadVisible = true;
 
   // X68000 LED 制御コマンド (bit7=1) の各ビット → 対応キーのスキャンコード
   //   bit0: かな, bit1: ローマ字, bit2: コード入力, bit3: CAPS,
@@ -191,12 +198,19 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
 
   @override
   Widget build(BuildContext context) {
+    final hasMouse = widget.mouseChannel != null;
     return Scaffold(
       backgroundColor: const Color(0xFF1a1a1a),
       appBar: AppBar(
         title: const Text('X68000 Keyboard'),
         backgroundColor: const Color(0xFF000000),
         actions: [
+          if (hasMouse)
+            IconButton(
+              tooltip: _trackpadVisible ? 'トラックパッドを非表示' : 'トラックパッドを表示',
+              icon: Icon(_trackpadVisible ? Icons.touch_app : Icons.touch_app_outlined),
+              onPressed: () => setState(() => _trackpadVisible = !_trackpadVisible),
+            ),
           IconButton(
             tooltip: _numpadVisible ? 'テンキーを非表示' : 'テンキーを表示',
             icon: Icon(_numpadVisible ? Icons.dialpad : Icons.dialpad_outlined),
@@ -207,7 +221,24 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
       body: SafeArea(
         child: LayoutBuilder(
           builder: (context, constraints) {
-            return _buildKeyboard(constraints);
+            final showTrackpad = hasMouse && _trackpadVisible;
+            final keyboardArea = _buildKeyboard(constraints);
+            if (!showTrackpad) return keyboardArea;
+            // トラックパッド領域は画面高さの約 30%、下限 130 / 上限 220
+            final trackpadH =
+                (constraints.maxHeight * 0.3).clamp(130.0, 220.0);
+            return Column(
+              children: [
+                Expanded(child: keyboardArea),
+                SizedBox(
+                  height: trackpadH,
+                  child: _TrackpadArea(
+                    midi: widget.midi,
+                    channel: widget.mouseChannel!,
+                  ),
+                ),
+              ],
+            );
           },
         ),
       ),
@@ -701,5 +732,224 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
     if (label.length <= 3) return size * 0.32;
     if (label.length <= 5) return size * 0.22;
     return size * 0.18;
+  }
+}
+
+// =============================================================================
+// マウス トラックパッド + 左右ボタン
+// =============================================================================
+// プロトコル仕様 §4.3 準拠:
+//   Note On/Off ch=mouse, note=0(L)/1(R)
+//   CC ch=mouse, control=0x30(dX)/0x31(dY), value=64+delta (-64..+63)
+// =============================================================================
+
+class _TrackpadArea extends StatelessWidget {
+  final MidiService midi;
+  final int channel;
+  const _TrackpadArea({required this.midi, required this.channel});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(8, 4, 8, 8),
+      child: Row(
+        children: [
+          _MouseButton(
+            midi: midi, channel: channel, note: 0,  // 左ボタン
+            label: 'L',
+          ),
+          const SizedBox(width: 6),
+          Expanded(child: _TrackpadSurface(midi: midi, channel: channel)),
+          const SizedBox(width: 6),
+          _MouseButton(
+            midi: midi, channel: channel, note: 1,  // 右ボタン
+            label: 'R',
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _MouseButton extends StatefulWidget {
+  final MidiService midi;
+  final int channel;
+  final int note;
+  final String label;
+  const _MouseButton({
+    required this.midi,
+    required this.channel,
+    required this.note,
+    required this.label,
+  });
+  @override
+  State<_MouseButton> createState() => _MouseButtonState();
+}
+
+class _MouseButtonState extends State<_MouseButton> {
+  bool _pressed = false;
+
+  void _down() {
+    if (_pressed) return;
+    setState(() => _pressed = true);
+    widget.midi.sendNoteOn(widget.channel, widget.note, 127);
+    HapticFeedback.lightImpact();
+  }
+
+  void _up() {
+    if (!_pressed) return;
+    setState(() => _pressed = false);
+    widget.midi.sendNoteOff(widget.channel, widget.note);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTapDown: (_) => _down(),
+      onTapUp: (_) => _up(),
+      onTapCancel: () => _up(),
+      child: Container(
+        width: 56,
+        decoration: BoxDecoration(
+          color: _pressed ? const Color(0xFF505050) : const Color(0xFF222222),
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(
+            color: _pressed ? Colors.white : const Color(0xFF555555),
+            width: _pressed ? 2 : 1,
+          ),
+        ),
+        child: Center(
+          child: Text(
+            widget.label,
+            style: TextStyle(
+              color: _pressed ? Colors.white : Colors.grey.shade300,
+              fontSize: 22,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _TrackpadSurface extends StatefulWidget {
+  final MidiService midi;
+  final int channel;
+  const _TrackpadSurface({required this.midi, required this.channel});
+  @override
+  State<_TrackpadSurface> createState() => _TrackpadSurfaceState();
+}
+
+class _TrackpadSurfaceState extends State<_TrackpadSurface> {
+  static const int _ccDx = 0x30;
+  static const int _ccDy = 0x31;
+  static const int _noteLeft = 0;
+  // 1 ピクセル = 何マウスカウントか。実機の感度に合わせて軽く調整可
+  static const double _sensitivity = 1.0;
+  static const Duration _flushPeriod = Duration(milliseconds: 16);
+
+  double _accumDx = 0;
+  double _accumDy = 0;
+  Timer? _flushTimer;
+
+  // 各 pan 開始時の指の位置を覚えておき、ここからの相対量を取る
+  // (DragUpdateDetails.delta が pan 境界をまたぐ際に変な値になるケース対策)
+  Offset? _lastPos;
+
+  @override
+  void initState() {
+    super.initState();
+    _flushTimer = Timer.periodic(_flushPeriod, (_) => _flush());
+  }
+
+  @override
+  void dispose() {
+    _flushTimer?.cancel();
+    super.dispose();
+  }
+
+  void _flush() {
+    var dx = _accumDx.round();
+    var dy = _accumDy.round();
+    if (dx == 0 && dy == 0) return;
+    _accumDx -= dx;
+    _accumDy -= dy;
+
+    // CC は 7 bit (-64..+63) なので、超える分は連続送信して累積させる (§4.3.3)
+    while (dx != 0) {
+      final chunk = dx.clamp(-63, 63);
+      widget.midi.sendCC(widget.channel, _ccDx, 64 + chunk);
+      dx -= chunk;
+    }
+    while (dy != 0) {
+      final chunk = dy.clamp(-63, 63);
+      widget.midi.sendCC(widget.channel, _ccDy, 64 + chunk);
+      dy -= chunk;
+    }
+  }
+
+  void _onPanStart(DragStartDetails d) {
+    _lastPos = d.localPosition;
+  }
+
+  void _onPanUpdate(DragUpdateDetails d) {
+    final last = _lastPos;
+    if (last == null) {
+      // onPanStart を経由しない場合の保険
+      _lastPos = d.localPosition;
+      return;
+    }
+    final dx = d.localPosition.dx - last.dx;
+    final dy = d.localPosition.dy - last.dy;
+    _lastPos = d.localPosition;
+    _accumDx += dx * _sensitivity;
+    _accumDy += dy * _sensitivity;
+  }
+
+  void _onPanEnd(DragEndDetails d) {
+    _lastPos = null;
+  }
+
+  void _onPanCancel() {
+    _lastPos = null;
+  }
+
+  // タップ = 左クリック (Note On → 短い遅延 → Note Off)
+  void _onTap() {
+    HapticFeedback.lightImpact();
+    widget.midi.sendNoteOn(widget.channel, _noteLeft, 127);
+    Future.delayed(const Duration(milliseconds: 40), () {
+      widget.midi.sendNoteOff(widget.channel, _noteLeft);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onPanStart: _onPanStart,
+      onPanUpdate: _onPanUpdate,
+      onPanEnd: _onPanEnd,
+      onPanCancel: _onPanCancel,
+      onTap: _onTap,
+      child: Container(
+        decoration: BoxDecoration(
+          color: const Color(0xFF1a1f24),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: const Color(0xFF555555)),
+        ),
+        child: const Center(
+          child: Text(
+            'TRACKPAD',
+            style: TextStyle(
+              color: Color(0xFF444444),
+              fontSize: 14,
+              letterSpacing: 4,
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }

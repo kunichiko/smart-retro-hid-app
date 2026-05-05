@@ -112,8 +112,26 @@ class _HomePageState extends State<HomePage> {
       return;
     }
 
-    // 1 チャンネルなら直接遷移、複数なら選択画面
-    if (identity.channels.length == 1) {
+    // X68000 のキーボード+マウス両方が割り当て済みなら統合ビュー直行
+    final x68kKb = identity.channels
+        .cast<ChannelAssignment?>()
+        .firstWhere(
+          (c) => c!.hidType == HidType.keyboard && c.targetSystem == TargetSystem.x68000,
+          orElse: () => null,
+        );
+    final x68kMouse = identity.channels
+        .cast<ChannelAssignment?>()
+        .firstWhere(
+          (c) => c!.hidType == HidType.mouse && c.targetSystem == TargetSystem.x68000,
+          orElse: () => null,
+        );
+    final isX68kCombo = x68kKb != null &&
+        x68kMouse != null &&
+        identity.channels.length == 2;
+
+    if (isX68kCombo) {
+      _routeToChannel(device, x68kKb);
+    } else if (identity.channels.length == 1) {
       _routeToChannel(device, identity.channels.first);
     } else {
       _showChannelPicker(device, identity);
@@ -125,7 +143,18 @@ class _HomePageState extends State<HomePage> {
     if (ch.hidType == HidType.joystick) {
       page = JoystickPage(midi: _midi, channel: ch.midiChannel);
     } else if (ch.hidType == HidType.keyboard && ch.targetSystem == TargetSystem.x68000) {
-      page = X68kKeyboardPage(midi: _midi, channel: ch.midiChannel);
+      // 同じデバイスに X68000 マウスもあれば mouseChannel を渡してトラックパッド表示
+      final mouseCh = device.identity?.channels
+          .cast<ChannelAssignment?>()
+          .firstWhere(
+            (c) => c!.hidType == HidType.mouse && c.targetSystem == TargetSystem.x68000,
+            orElse: () => null,
+          );
+      page = X68kKeyboardPage(
+        midi: _midi,
+        channel: ch.midiChannel,
+        mouseChannel: mouseCh?.midiChannel,
+      );
     }
 
     if (page == null) {
