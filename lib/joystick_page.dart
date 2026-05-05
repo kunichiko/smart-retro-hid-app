@@ -1,12 +1,18 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'midi_service.dart';
 
 enum PadMode { atari, md6 }
 
 class JoystickPage extends StatefulWidget {
   final MidiService midi;
+  final int channel;
 
-  const JoystickPage({super.key, required this.midi});
+  const JoystickPage({
+    super.key,
+    required this.midi,
+    this.channel = MidiService.chJoystickDefault,
+  });
 
   @override
   State<JoystickPage> createState() => _JoystickPageState();
@@ -14,6 +20,16 @@ class JoystickPage extends StatefulWidget {
 
 class _JoystickPageState extends State<JoystickPage> {
   PadMode _mode = PadMode.atari;
+
+  @override
+  void initState() {
+    super.initState();
+    // 横向き固定
+    SystemChrome.setPreferredOrientations([
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.landscapeRight,
+    ]);
+  }
 
   @override
   Widget build(BuildContext context) {
