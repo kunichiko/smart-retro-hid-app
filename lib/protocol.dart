@@ -158,6 +158,7 @@ class SysExBuilder {
   static const int cmdIdentifyRsp = 0x02;
   static const int cmdCapabilityReq = 0x03;
   static const int cmdCapabilityRsp = 0x04;
+  static const int cmdTargetRx = 0x05;   // デバイス→ホスト: ターゲット機からの受信バイト
   static const int cmdSetConfig = 0x10;
   static const int cmdReset = 0x7F;
 

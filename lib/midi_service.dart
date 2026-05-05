@@ -26,6 +26,11 @@ class MidiService {
   // チャンネル割り当てを SysEx で受信したら通知
   void Function(DeviceIdentity)? onIdentifyResponse;
 
+  // ターゲット機受信バイト通知 (TARGET_RX)
+  //   midi_channel: 送信元の機能の MIDI チャンネル (0-indexed)
+  //   byte: ターゲット機が送ってきた生バイト
+  void Function(int midiChannel, int byte)? onTargetRx;
+
   // SysEx 受信用バッファ
   final List<int> _sysexBuf = [];
   bool _sysexReceiving = false;
@@ -102,6 +107,7 @@ class MidiService {
           _sysexReceiving = false;
         }
       }
+      // 現状チャンネルメッセージ (Note/CC) のホスト方向受信は未使用
     }
   }
 
@@ -112,6 +118,12 @@ class MidiService {
     if (cmd == SysExBuilder.cmdIdentifyRsp) {
       final id = DeviceIdentity.parse(sysex);
       if (id != null) onIdentifyResponse?.call(id);
+    } else if (cmd == SysExBuilder.cmdTargetRx) {
+      // F0 7D 01 05 <ch> <hi4> <lo4> F7
+      if (sysex.length != 8) return;
+      final ch = sysex[4];
+      final byte = ((sysex[5] & 0x0F) << 4) | (sysex[6] & 0x0F);
+      onTargetRx?.call(ch, byte);
     }
     // TODO: capability response, status notifications
   }

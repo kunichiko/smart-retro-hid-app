@@ -30,6 +30,25 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
   // テンキーを表示するか (オフだとメインキーが大きく表示される)
   bool _numpadVisible = true;
 
+  // X68000 LED 制御コマンド (bit7=1) の各ビット → 対応キーのスキャンコード
+  //   bit0: かな, bit1: ローマ字, bit2: コード入力, bit3: CAPS,
+  //   bit4: INS,  bit5: ひらがな, bit6: 全角
+  // X68000 のビット意味は「0=点灯, 1=消灯」
+  static const List<int> _ledBitToScancode = [
+    0x5A, // bit0 かな
+    0x5B, // bit1 ローマ字
+    0x5C, // bit2 コード入力
+    0x5D, // bit3 CAPS
+    0x5E, // bit4 INS
+    0x5F, // bit5 ひらがな
+    0x60, // bit6 全角
+  ];
+  // scancode → 点灯/消灯
+  final Set<int> _ledOn = {};
+
+  // 元のハンドラを保持して dispose で復元
+  void Function(int, int)? _prevTargetRxHandler;
+
   @override
   void initState() {
     super.initState();
@@ -37,6 +56,40 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
       DeviceOrientation.landscapeLeft,
       DeviceOrientation.landscapeRight,
     ]);
+
+    _prevTargetRxHandler = widget.midi.onTargetRx;
+    widget.midi.onTargetRx = _handleTargetRx;
+  }
+
+  @override
+  void dispose() {
+    widget.midi.onTargetRx = _prevTargetRxHandler;
+    super.dispose();
+  }
+
+  // ターゲット機 (X68000) から届いた生バイトを解釈する
+  void _handleTargetRx(int midiChannel, int byte) {
+    if (midiChannel != widget.channel) return;
+
+    if ((byte & 0x80) != 0) {
+      // LED 制御コマンド: bit7=1, bit6..0 が各 LED 状態 (0=点灯, 1=消灯)
+      setState(() {
+        for (int i = 0; i < _ledBitToScancode.length; i++) {
+          final lit = ((byte >> i) & 1) == 0;
+          final sc = _ledBitToScancode[i];
+          if (lit) {
+            _ledOn.add(sc);
+          } else {
+            _ledOn.remove(sc);
+          }
+        }
+      });
+      return;
+    }
+    // 0x60-0x6F: キーリピート開始遅延 (200 + n × 100 ms)
+    // 0x70-0x7F: キーリピート間隔 (30 + n² × 5 ms)
+    // 0x54-0x57: LED 輝度
+    // 現状はログのみ (将来 UI に反映予定)
   }
 
   void _press(int code) {
@@ -380,6 +433,7 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
 
   Widget _keyMulti(List<String> labels, int scancode, double width, double height) {
     final pressed = _pressed.contains(scancode);
+    final ledOn = _ledOn.contains(scancode);
     // 宣言幅 width にパディング (1.5px × 2) を内包させる
     return SizedBox(
       width: width,
@@ -390,31 +444,60 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
           onTapDown: (_) => _press(scancode),
           onTapUp: (_) => _release(scancode),
           onTapCancel: () => _release(scancode),
-          child: Container(
-            decoration: BoxDecoration(
-              color: pressed ? const Color(0xFF505050) : const Color(0xFF222222),
-              borderRadius: BorderRadius.circular(4),
-              border: Border.all(
-                color: pressed ? Colors.white : const Color(0xFF555555),
-                width: pressed ? 2 : 1,
+          child: Stack(
+            children: [
+              Container(
+                decoration: BoxDecoration(
+                  color: pressed ? const Color(0xFF505050) : const Color(0xFF222222),
+                  borderRadius: BorderRadius.circular(4),
+                  border: Border.all(
+                    color: pressed ? Colors.white : const Color(0xFF555555),
+                    width: pressed ? 2 : 1,
+                  ),
+                ),
+                child: Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: labels
+                        .map((s) => Text(
+                              s,
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                color: pressed ? Colors.white : Colors.grey.shade300,
+                                fontSize: _autoFontSize(s, width, height),
+                                height: 1.0,
+                              ),
+                            ))
+                        .toList(),
+                  ),
+                ),
               ),
-            ),
-            child: Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: labels
-                    .map((s) => Text(
-                          s,
-                          textAlign: TextAlign.center,
-                          style: TextStyle(
-                            color: pressed ? Colors.white : Colors.grey.shade300,
-                            fontSize: _autoFontSize(s, width, height),
-                            height: 1.0,
-                          ),
-                        ))
-                    .toList(),
-              ),
-            ),
+              // LED ドット (X68000 実機の LED に相当する小さな緑色のインジケータ)
+              if (_ledBitToScancode.contains(scancode))
+                Positioned(
+                  top: 3,
+                  right: 3,
+                  child: Container(
+                    width: 6,
+                    height: 6,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: ledOn
+                          ? const Color(0xFF66FF88)
+                          : const Color(0xFF1a3a1a),
+                      boxShadow: ledOn
+                          ? const [
+                              BoxShadow(
+                                color: Color(0x8866FF88),
+                                blurRadius: 4,
+                                spreadRadius: 0.5,
+                              ),
+                            ]
+                          : null,
+                    ),
+                  ),
+                ),
+            ],
           ),
         ),
       ),
