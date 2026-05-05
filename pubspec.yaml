@@ -47,6 +47,19 @@ dev_dependencies:
   # rules and activating additional ones.
   flutter_lints: ^5.0.0
 
+  # アイコン一括生成
+  flutter_launcher_icons: ^0.14.4
+
+# アイコン生成設定 (dart run flutter_launcher_icons で各プラットフォームに反映)
+flutter_launcher_icons:
+  image_path: "assets/icon.png"
+  android: true
+  ios: true
+  remove_alpha_ios: true
+  macos:
+    generate: true
+    image_path: "assets/icon.png"
+
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
 
