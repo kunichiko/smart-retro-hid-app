@@ -1,7 +1,21 @@
+import 'dart:async';
+import 'dart:math' as math;
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'midi_service.dart';
 import 'joystick_settings.dart';
+
+/// 連射対象の候補。設定シートの ON/OFF 表示順序もこの順。
+const List<({int note, String label})> _turboCandidates = [
+  (note: MidiService.noteX, label: 'X'),
+  (note: MidiService.noteY, label: 'Y'),
+  (note: MidiService.noteZ, label: 'Z'),
+  (note: MidiService.noteA, label: 'A'),
+  (note: MidiService.noteB, label: 'B'),
+  (note: MidiService.noteC, label: 'C'),
+];
 
 enum PadMode { atari, md6 }
 
@@ -247,12 +261,16 @@ class _ButtonGroup extends StatefulWidget {
   final List<_ButtonSpec> buttons;
   final Size groupSize;
   final double extraHitRadius;
+  final Set<int> turboNotes;
+  final double turboRate;
 
   const _ButtonGroup({
     required this.midi,
     required this.buttons,
     required this.groupSize,
     required this.extraHitRadius,
+    required this.turboNotes,
+    required this.turboRate,
   });
 
   @override
@@ -261,7 +279,15 @@ class _ButtonGroup extends StatefulWidget {
 
 class _ButtonGroupState extends State<_ButtonGroup> {
   final Map<int, Offset> _pointers = {};
+
+  /// 指がボタン上に乗っている note 集合 (論理的に押下中)
   Set<int> _activeNotes = {};
+
+  /// turbo モードの note の現在の物理状態 (true = press 中、false = release 中)。
+  /// turbo 中 でかつ active な note のみエントリを持つ。
+  final Map<int, bool> _turboPressed = {};
+
+  Timer? _turboTimer;
 
   void _onPointerDown(PointerDownEvent e) {
     _pointers[e.pointer] = e.localPosition;
@@ -293,36 +319,125 @@ class _ButtonGroupState extends State<_ButtonGroup> {
       }
     }
 
-    final pressed = newActive.difference(_activeNotes);
-    final released = _activeNotes.difference(newActive);
+    final entered = newActive.difference(_activeNotes);
+    final exited = _activeNotes.difference(newActive);
 
-    for (final note in pressed) {
+    // 指が乗った: 即時 press。turbo 対象なら以降タイマーで toggle する。
+    for (final note in entered) {
       widget.midi.joystickPress(note);
+      if (widget.turboNotes.contains(note)) {
+        _turboPressed[note] = true;
+      }
     }
-    for (final note in released) {
-      widget.midi.joystickRelease(note);
+    // 指が離れた: 物理的に押下中なら release。
+    for (final note in exited) {
+      if (widget.turboNotes.contains(note)) {
+        if (_turboPressed[note] == true) {
+          widget.midi.joystickRelease(note);
+        }
+        _turboPressed.remove(note);
+      } else {
+        widget.midi.joystickRelease(note);
+      }
     }
 
-    if (pressed.isNotEmpty || released.isNotEmpty) {
+    if (entered.isNotEmpty || exited.isNotEmpty) {
       setState(() => _activeNotes = newActive);
+    }
+
+    _ensureTurboTimer();
+  }
+
+  void _ensureTurboTimer() {
+    final hasActiveTurbo = _activeNotes.any(widget.turboNotes.contains);
+    if (hasActiveTurbo && _turboTimer == null) {
+      _startTurboTimer();
+    } else if (!hasActiveTurbo && _turboTimer != null) {
+      _stopTurboTimer();
+    }
+  }
+
+  void _startTurboTimer() {
+    // rate Hz = 1秒間の press 回数。1 cycle = press + release の 2 トグルなので、
+    // タイマー間隔は 1000 / (2 * rate) ms。最低 16 ms (≈ 60 Hz upper bound) で
+    // クランプして暴走を防ぐ。
+    final periodMs = math.max(16, (1000 / (2 * widget.turboRate)).round());
+    _turboTimer = Timer.periodic(
+      Duration(milliseconds: periodMs),
+      (_) => _onTurboTick(),
+    );
+  }
+
+  void _stopTurboTimer() {
+    _turboTimer?.cancel();
+    _turboTimer = null;
+  }
+
+  void _onTurboTick() {
+    for (final note in _activeNotes) {
+      if (!widget.turboNotes.contains(note)) continue;
+      final wasPressed = _turboPressed[note] ?? false;
+      final nowPressed = !wasPressed;
+      _turboPressed[note] = nowPressed;
+      if (nowPressed) {
+        widget.midi.joystickPress(note);
+      } else {
+        widget.midi.joystickRelease(note);
+      }
     }
   }
 
   @override
   void didUpdateWidget(covariant _ButtonGroup oldWidget) {
     super.didUpdateWidget(oldWidget);
+
     // 設定値 (extraHitRadius) やボタン定義が変わったら、現在のポインタ位置で
     // 押下中集合を再計算して即時反映する。
     if (oldWidget.extraHitRadius != widget.extraHitRadius ||
         oldWidget.buttons != widget.buttons) {
       _recompute();
     }
+
+    // turbo 集合変化: アクティブな note の物理状態を破綻させないよう調整。
+    if (!setEquals(oldWidget.turboNotes, widget.turboNotes)) {
+      // turbo → 非 turbo に変わった note: もし release 半サイクルで止まって
+      // いたら再 press して、指を離すまで押し続け状態にする。
+      for (final note
+          in oldWidget.turboNotes.difference(widget.turboNotes)) {
+        if (_activeNotes.contains(note) && _turboPressed[note] != true) {
+          widget.midi.joystickPress(note);
+        }
+        _turboPressed.remove(note);
+      }
+      // 非 turbo → turbo に変わった note: 既に press 中の状態から turbo
+      // サイクルに入る。物理状態は press のままにし、タイマー起動。
+      for (final note
+          in widget.turboNotes.difference(oldWidget.turboNotes)) {
+        if (_activeNotes.contains(note)) {
+          _turboPressed[note] = true;
+        }
+      }
+      _ensureTurboTimer();
+    }
+
+    // turbo レート変更: タイマー再起動。
+    if (oldWidget.turboRate != widget.turboRate && _turboTimer != null) {
+      _stopTurboTimer();
+      _startTurboTimer();
+    }
   }
 
   @override
   void dispose() {
+    _stopTurboTimer();
     for (final note in _activeNotes) {
-      widget.midi.joystickRelease(note);
+      if (widget.turboNotes.contains(note)) {
+        if (_turboPressed[note] == true) {
+          widget.midi.joystickRelease(note);
+        }
+      } else {
+        widget.midi.joystickRelease(note);
+      }
     }
     super.dispose();
   }
@@ -350,6 +465,7 @@ class _ButtonGroupState extends State<_ButtonGroup> {
                     color: btn.color,
                     size: btn.size,
                     pressed: _activeNotes.contains(btn.note),
+                    turbo: widget.turboNotes.contains(btn.note),
                   ),
                 ),
               ),
@@ -399,6 +515,8 @@ class _AtariLayout extends StatelessWidget {
               buttons: buttons,
               groupSize: const Size(groupW, btnSize),
               extraHitRadius: settings.extraHitRadius,
+              turboNotes: settings.turboNotes,
+              turboRate: settings.turboRate,
             ),
           ],
         ),
@@ -472,6 +590,8 @@ class _Md6Layout extends StatelessWidget {
                     buttons: buttons,
                     groupSize: const Size(groupW, groupH),
                     extraHitRadius: settings.extraHitRadius,
+                    turboNotes: settings.turboNotes,
+                    turboRate: settings.turboRate,
                   ),
                 ],
               ),
@@ -493,6 +613,7 @@ class _ActionButtonView extends StatelessWidget {
   final double size;
   final double? width;
   final bool pressed;
+  final bool turbo;
 
   const _ActionButtonView({
     required this.label,
@@ -500,6 +621,7 @@ class _ActionButtonView extends StatelessWidget {
     required this.size,
     this.width,
     required this.pressed,
+    this.turbo = false,
   });
 
   @override
@@ -515,14 +637,31 @@ class _ActionButtonView extends StatelessWidget {
           width: pressed ? 3 : 1,
         ),
       ),
-      child: Center(
-        child: Text(
-          label,
-          style: TextStyle(
-            fontSize: size > 60 ? 22 : 14,
-            fontWeight: FontWeight.bold,
+      child: Stack(
+        children: [
+          Center(
+            child: Text(
+              label,
+              style: TextStyle(
+                fontSize: size > 60 ? 22 : 14,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
           ),
-        ),
+          if (turbo)
+            const Positioned(
+              top: 2,
+              right: 4,
+              child: Text(
+                '連',
+                style: TextStyle(
+                  fontSize: 10,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.amberAccent,
+                ),
+              ),
+            ),
+        ],
       ),
     );
   }
@@ -606,12 +745,27 @@ class _SettingsSheet extends StatefulWidget {
 class _SettingsSheetState extends State<_SettingsSheet> {
   late double _deadZone;
   late double _extraHit;
+  late double _turboRate;
 
   @override
   void initState() {
     super.initState();
     _deadZone = widget.settings.deadZoneRatio;
     _extraHit = widget.settings.extraHitRadius;
+    _turboRate = widget.settings.turboRate;
+    widget.settings.addListener(_onSettingsChanged);
+  }
+
+  @override
+  void dispose() {
+    widget.settings.removeListener(_onSettingsChanged);
+    super.dispose();
+  }
+
+  void _onSettingsChanged() {
+    // turbo の chip 切り替えなどで再描画する。slider の値はローカル state を
+    // 正にしてあるので上書きしない。
+    if (mounted) setState(() {});
   }
 
   @override
@@ -663,6 +817,50 @@ class _SettingsSheetState extends State<_SettingsSheet> {
             ),
             const Text(
               '大きくすると隣接ボタンとオーバーラップし、指の腹での同時押しや A→B のスライド遷移ができるようになる。',
+              style: TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+
+            const SizedBox(height: 16),
+
+            // 連射速度
+            Text('連射速度: ${_turboRate.toStringAsFixed(0)} Hz'),
+            Slider(
+              value: _turboRate,
+              min: 1.0,
+              max: 30.0,
+              divisions: 29,
+              label: '${_turboRate.toStringAsFixed(0)} Hz',
+              onChanged: (v) => setState(() => _turboRate = v),
+              onChangeEnd: widget.settings.setTurboRate,
+            ),
+            const Text(
+              '1 秒間に発火するボタン押下回数。下の連射 ON/OFF を有効にしたボタンに適用される。',
+              style: TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+
+            const SizedBox(height: 16),
+
+            // 連射 ON/OFF (per button)
+            const Text(
+              '連射 ON/OFF',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (final c in _turboCandidates)
+                  FilterChip(
+                    label: Text(c.label),
+                    selected: widget.settings.isTurbo(c.note),
+                    onSelected: (v) => widget.settings.setTurbo(c.note, v),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              '有効にしたボタンは押している間、上の連射速度で press / release を繰り返す。',
               style: TextStyle(fontSize: 12, color: Colors.grey),
             ),
           ],
