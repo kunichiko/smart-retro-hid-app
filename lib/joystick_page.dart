@@ -3,6 +3,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'l10n/app_localizations.dart';
 import 'midi_service.dart';
 import 'joystick_settings.dart';
 import 'orientation_helper.dart';
@@ -65,19 +66,20 @@ class _JoystickPageState extends State<JoystickPage> {
 
   @override
   Widget build(BuildContext context) {
+    final l = AppLocalizations.of(context)!;
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Joystick'),
+        title: Text(l.joystickTitle),
         actions: [
           IconButton(
             icon: const Icon(Icons.tune),
-            tooltip: '操作設定',
+            tooltip: l.controllerSettings,
             onPressed: _showSettings,
           ),
           SegmentedButton<PadMode>(
-            segments: const [
-              ButtonSegment(value: PadMode.atari, label: Text('ATARI')),
-              ButtonSegment(value: PadMode.md6, label: Text('MD 6B')),
+            segments: [
+              ButtonSegment(value: PadMode.atari, label: Text(l.padModeAtari)),
+              ButtonSegment(value: PadMode.md6, label: Text(l.padModeMd6)),
             ],
             selected: {_mode},
             onSelectionChanged: (v) {
@@ -656,12 +658,12 @@ class _ActionButtonView extends StatelessWidget {
             ),
           ),
           if (turbo)
-            const Positioned(
+            Positioned(
               top: 2,
               right: 4,
               child: Text(
-                '連',
-                style: TextStyle(
+                AppLocalizations.of(context)!.turboBadge,
+                style: const TextStyle(
                   fontSize: 10,
                   fontWeight: FontWeight.bold,
                   color: Colors.amberAccent,
@@ -777,9 +779,13 @@ class _SettingsSheetState extends State<_SettingsSheet> {
 
   @override
   Widget build(BuildContext context) {
+    final l = AppLocalizations.of(context)!;
     // 横画面では縦が狭いのでスクロール可能にする。
     // viewInsets はソフトキーボード等で隠れる量、SafeArea でノッチ等の余白も避ける。
     final bottomInset = MediaQuery.of(context).viewInsets.bottom;
+    final deadPct = (_deadZone * 100).round();
+    final extraPx = _extraHit.round();
+    final rateHz = _turboRate.round();
     return SafeArea(
       child: SingleChildScrollView(
         padding: EdgeInsets.fromLTRB(20, 20, 20, 24 + bottomInset),
@@ -787,70 +793,70 @@ class _SettingsSheetState extends State<_SettingsSheet> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
-              '操作設定',
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            Text(
+              l.controllerSettings,
+              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
             ),
             const SizedBox(height: 16),
 
             // 不感エリア
-            Text('方向キー不感エリア半径: ${(_deadZone * 100).toStringAsFixed(0)}%'),
+            Text(l.deadZoneLabel(deadPct)),
             Slider(
               value: _deadZone,
               min: 0.0,
               max: 0.4,
               divisions: 40,
-              label: '${(_deadZone * 100).toStringAsFixed(0)}%',
+              label: '$deadPct%',
               onChanged: (v) => setState(() => _deadZone = v),
               onChangeEnd: widget.settings.setDeadZoneRatio,
             ),
-            const Text(
-              '小さいほど少ない指の動きで方向が反応する。0% は中央でも常時いずれかが押された状態になる。',
-              style: TextStyle(fontSize: 12, color: Colors.grey),
+            Text(
+              l.deadZoneHelp,
+              style: const TextStyle(fontSize: 12, color: Colors.grey),
             ),
 
             const SizedBox(height: 16),
 
             // ボタンヒット拡張
-            Text('ボタンヒット範囲拡張: +${_extraHit.toStringAsFixed(0)} px'),
+            Text(l.extraHitLabel(extraPx)),
             Slider(
               value: _extraHit,
               min: 0.0,
               max: 40.0,
               divisions: 40,
-              label: '+${_extraHit.toStringAsFixed(0)} px',
+              label: '+$extraPx px',
               onChanged: (v) => setState(() => _extraHit = v),
               onChangeEnd: widget.settings.setExtraHitRadius,
             ),
-            const Text(
-              '大きくすると隣接ボタンとオーバーラップし、指の腹での同時押しや A→B のスライド遷移ができるようになる。',
-              style: TextStyle(fontSize: 12, color: Colors.grey),
+            Text(
+              l.extraHitHelp,
+              style: const TextStyle(fontSize: 12, color: Colors.grey),
             ),
 
             const SizedBox(height: 16),
 
             // 連射速度
-            Text('連射速度: ${_turboRate.toStringAsFixed(0)} Hz'),
+            Text(l.turboRateLabel(rateHz)),
             Slider(
               value: _turboRate,
               min: 1.0,
               max: 30.0,
               divisions: 29,
-              label: '${_turboRate.toStringAsFixed(0)} Hz',
+              label: '$rateHz Hz',
               onChanged: (v) => setState(() => _turboRate = v),
               onChangeEnd: widget.settings.setTurboRate,
             ),
-            const Text(
-              '1 秒間に発火するボタン押下回数。下の連射 ON/OFF を有効にしたボタンに適用される。',
-              style: TextStyle(fontSize: 12, color: Colors.grey),
+            Text(
+              l.turboRateHelp,
+              style: const TextStyle(fontSize: 12, color: Colors.grey),
             ),
 
             const SizedBox(height: 16),
 
             // 連射 ON/OFF (per button)
-            const Text(
-              '連射 ON/OFF',
-              style: TextStyle(fontWeight: FontWeight.bold),
+            Text(
+              l.turboToggleSection,
+              style: const TextStyle(fontWeight: FontWeight.bold),
             ),
             const SizedBox(height: 8),
             Wrap(
@@ -866,9 +872,9 @@ class _SettingsSheetState extends State<_SettingsSheet> {
               ],
             ),
             const SizedBox(height: 4),
-            const Text(
-              '有効にしたボタンは押している間、上の連射速度で press / release を繰り返す。',
-              style: TextStyle(fontSize: 12, color: Colors.grey),
+            Text(
+              l.turboToggleHelp,
+              style: const TextStyle(fontSize: 12, color: Colors.grey),
             ),
           ],
         ),

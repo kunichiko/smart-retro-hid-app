@@ -8,6 +8,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'l10n/app_localizations.dart';
 import 'midi_service.dart';
 import 'orientation_helper.dart';
 
@@ -340,7 +341,7 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
     return Scaffold(
       backgroundColor: const Color(0xFF1a1a1a),
       appBar: AppBar(
-        title: const Text('X68000 Keyboard'),
+        title: Text(AppLocalizations.of(context)!.x68kKeyboardTitle),
         backgroundColor: const Color(0xFF000000),
         actions: [
           if (hasMouse)

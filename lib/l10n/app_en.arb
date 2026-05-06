@@ -1,0 +1,80 @@
+{
+  "@@locale": "en",
+
+  "appTitle": "Mimic X",
+  "@appTitle": { "description": "App display name" },
+
+  "homeRescanTooltip": "Rescan",
+  "homeAboutTooltip": "About",
+  "homeSearching": "Searching for devices…",
+  "homeNoDevicesTitle": "No devices found",
+  "homeNoDevicesHint": "Connect a Mimic X device and press the reload button in the top right.",
+  "homeIncompatibleNote": "Not Mimic X compatible (no response)",
+  "homeFirmwareVersion": "fw {fwVersion} (proto {protoVersion})",
+  "@homeFirmwareVersion": {
+    "placeholders": {
+      "fwVersion": { "type": "String" },
+      "protoVersion": { "type": "String" }
+    }
+  },
+  "homeChannelLabel": "CH{channel} - {target}",
+  "@homeChannelLabel": {
+    "placeholders": {
+      "channel": { "type": "int" },
+      "target": { "type": "String" }
+    }
+  },
+
+  "deviceNotResponding": "No response from device (may not be Mimic X compatible)",
+  "noChannelsAvailable": "No usable channels",
+  "unsupportedFunction": "Unsupported function: {hidType} / {target}",
+  "@unsupportedFunction": {
+    "placeholders": {
+      "hidType": { "type": "String" },
+      "target": { "type": "String" }
+    }
+  },
+  "selectFunction": "Select function",
+
+  "joystickTitle": "Joystick",
+  "controllerSettings": "Controller Settings",
+  "padModeAtari": "ATARI",
+  "padModeMd6": "MD 6B",
+
+  "deadZoneLabel": "D-pad dead zone radius: {percent}%",
+  "@deadZoneLabel": {
+    "placeholders": { "percent": { "type": "int" } }
+  },
+  "deadZoneHelp": "Smaller values respond to less finger movement. 0% means a direction is always pressed even at the center.",
+
+  "extraHitLabel": "Button hit area extension: +{px} px",
+  "@extraHitLabel": {
+    "placeholders": { "px": { "type": "int" } }
+  },
+  "extraHitHelp": "Larger values overlap adjacent buttons, so you can press multiple buttons with the side of one finger or slide from A to B.",
+
+  "turboRateLabel": "Turbo rate: {hz} Hz",
+  "@turboRateLabel": {
+    "placeholders": { "hz": { "type": "int" } }
+  },
+  "turboRateHelp": "Number of presses per second for buttons with turbo enabled.",
+
+  "turboToggleSection": "Turbo on/off",
+  "turboToggleHelp": "Buttons with turbo enabled will repeat press / release at the rate above while held.",
+  "turboBadge": "T",
+  "@turboBadge": { "description": "Short badge shown on a button when turbo is enabled" },
+
+  "x68kKeyboardTitle": "X68000 Keyboard",
+
+  "aboutTitle": "About",
+  "aboutAppDescription": "USB-MIDI controller app for retro PC HID emulation. Use a smartphone as a joystick or keyboard for X68000 / ATARI / Mega Drive via the Mimic X device.",
+  "aboutVersion": "Version {version} ({build})",
+  "@aboutVersion": {
+    "placeholders": {
+      "version": { "type": "String" },
+      "build": { "type": "String" }
+    }
+  },
+  "aboutLicensesButton": "Open source licenses",
+  "aboutCopyright": "© 2026 Kunihiko Ohnaka"
+}

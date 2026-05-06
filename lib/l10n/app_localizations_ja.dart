@@ -1,0 +1,123 @@
+// ignore: unused_import
+import 'package:intl/intl.dart' as intl;
+import 'app_localizations.dart';
+
+// ignore_for_file: type=lint
+
+/// The translations for Japanese (`ja`).
+class AppLocalizationsJa extends AppLocalizations {
+  AppLocalizationsJa([String locale = 'ja']) : super(locale);
+
+  @override
+  String get appTitle => 'Mimic X';
+
+  @override
+  String get homeRescanTooltip => '再スキャン';
+
+  @override
+  String get homeAboutTooltip => 'アプリについて';
+
+  @override
+  String get homeSearching => 'デバイスを検索中…';
+
+  @override
+  String get homeNoDevicesTitle => 'デバイスが見つかりません';
+
+  @override
+  String get homeNoDevicesHint => 'Mimic X デバイスを接続して、右上のリロードボタンを押してください';
+
+  @override
+  String get homeIncompatibleNote => 'Mimic X 非対応 (応答なし)';
+
+  @override
+  String homeFirmwareVersion(String fwVersion, String protoVersion) {
+    return 'fw $fwVersion (proto $protoVersion)';
+  }
+
+  @override
+  String homeChannelLabel(int channel, String target) {
+    return 'CH$channel - $target';
+  }
+
+  @override
+  String get deviceNotResponding => 'デバイスから応答がありません (Mimic X 互換ではない可能性)';
+
+  @override
+  String get noChannelsAvailable => '使用可能なチャンネルがありません';
+
+  @override
+  String unsupportedFunction(String hidType, String target) {
+    return '未対応の機能です: $hidType / $target';
+  }
+
+  @override
+  String get selectFunction => '使用する機能を選択';
+
+  @override
+  String get joystickTitle => 'Joystick';
+
+  @override
+  String get controllerSettings => '操作設定';
+
+  @override
+  String get padModeAtari => 'ATARI';
+
+  @override
+  String get padModeMd6 => 'MD 6B';
+
+  @override
+  String deadZoneLabel(int percent) {
+    return '方向キー不感エリア半径: $percent%';
+  }
+
+  @override
+  String get deadZoneHelp => '小さいほど少ない指の動きで方向が反応する。0% は中央でも常時いずれかが押された状態になる。';
+
+  @override
+  String extraHitLabel(int px) {
+    return 'ボタンヒット範囲拡張: +$px px';
+  }
+
+  @override
+  String get extraHitHelp =>
+      '大きくすると隣接ボタンとオーバーラップし、指の腹での同時押しや A→B のスライド遷移ができるようになる。';
+
+  @override
+  String turboRateLabel(int hz) {
+    return '連射速度: $hz Hz';
+  }
+
+  @override
+  String get turboRateHelp => '1 秒間に発火するボタン押下回数。下の連射 ON/OFF を有効にしたボタンに適用される。';
+
+  @override
+  String get turboToggleSection => '連射 ON/OFF';
+
+  @override
+  String get turboToggleHelp =>
+      '有効にしたボタンは押している間、上の連射速度で press / release を繰り返す。';
+
+  @override
+  String get turboBadge => '連';
+
+  @override
+  String get x68kKeyboardTitle => 'X68000 Keyboard';
+
+  @override
+  String get aboutTitle => 'このアプリについて';
+
+  @override
+  String get aboutAppDescription =>
+      'Mimic X デバイスを介して、スマートフォンをレトロ PC (X68000 / ATARI / メガドライブ等) のジョイスティックやキーボードとして使うための USB-MIDI コントローラアプリです。';
+
+  @override
+  String aboutVersion(String version, String build) {
+    return 'バージョン $version ($build)';
+  }
+
+  @override
+  String get aboutLicensesButton => 'オープンソースライセンス';
+
+  @override
+  String get aboutCopyright => '© 2026 Kunihiko Ohnaka';
+}

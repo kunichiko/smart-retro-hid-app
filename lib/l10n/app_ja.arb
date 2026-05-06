@@ -1,0 +1,45 @@
+{
+  "@@locale": "ja",
+
+  "appTitle": "Mimic X",
+
+  "homeRescanTooltip": "再スキャン",
+  "homeAboutTooltip": "アプリについて",
+  "homeSearching": "デバイスを検索中…",
+  "homeNoDevicesTitle": "デバイスが見つかりません",
+  "homeNoDevicesHint": "Mimic X デバイスを接続して、右上のリロードボタンを押してください",
+  "homeIncompatibleNote": "Mimic X 非対応 (応答なし)",
+  "homeFirmwareVersion": "fw {fwVersion} (proto {protoVersion})",
+  "homeChannelLabel": "CH{channel} - {target}",
+
+  "deviceNotResponding": "デバイスから応答がありません (Mimic X 互換ではない可能性)",
+  "noChannelsAvailable": "使用可能なチャンネルがありません",
+  "unsupportedFunction": "未対応の機能です: {hidType} / {target}",
+  "selectFunction": "使用する機能を選択",
+
+  "joystickTitle": "Joystick",
+  "controllerSettings": "操作設定",
+  "padModeAtari": "ATARI",
+  "padModeMd6": "MD 6B",
+
+  "deadZoneLabel": "方向キー不感エリア半径: {percent}%",
+  "deadZoneHelp": "小さいほど少ない指の動きで方向が反応する。0% は中央でも常時いずれかが押された状態になる。",
+
+  "extraHitLabel": "ボタンヒット範囲拡張: +{px} px",
+  "extraHitHelp": "大きくすると隣接ボタンとオーバーラップし、指の腹での同時押しや A→B のスライド遷移ができるようになる。",
+
+  "turboRateLabel": "連射速度: {hz} Hz",
+  "turboRateHelp": "1 秒間に発火するボタン押下回数。下の連射 ON/OFF を有効にしたボタンに適用される。",
+
+  "turboToggleSection": "連射 ON/OFF",
+  "turboToggleHelp": "有効にしたボタンは押している間、上の連射速度で press / release を繰り返す。",
+  "turboBadge": "連",
+
+  "x68kKeyboardTitle": "X68000 Keyboard",
+
+  "aboutTitle": "このアプリについて",
+  "aboutAppDescription": "Mimic X デバイスを介して、スマートフォンをレトロ PC (X68000 / ATARI / メガドライブ等) のジョイスティックやキーボードとして使うための USB-MIDI コントローラアプリです。",
+  "aboutVersion": "バージョン {version} ({build})",
+  "aboutLicensesButton": "オープンソースライセンス",
+  "aboutCopyright": "© 2026 Kunihiko Ohnaka"
+}

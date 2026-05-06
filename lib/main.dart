@@ -1,4 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
+import 'about_page.dart';
+import 'l10n/app_localizations.dart';
 import 'midi_service.dart';
 import 'protocol.dart';
 import 'joystick_page.dart';
@@ -18,7 +21,7 @@ class SmartRetroHidApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Mimic X',
+      onGenerateTitle: (ctx) => AppLocalizations.of(ctx)!.appTitle,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
           seedColor: Colors.blue,
@@ -26,6 +29,14 @@ class SmartRetroHidApp extends StatelessWidget {
         ),
         useMaterial3: true,
       ),
+      // 端末ロケールが ja なら日本語、それ以外はデフォルトの英語にフォールバック。
+      localizationsDelegates: const [
+        AppLocalizations.delegate,
+        GlobalMaterialLocalizations.delegate,
+        GlobalWidgetsLocalizations.delegate,
+        GlobalCupertinoLocalizations.delegate,
+      ],
+      supportedLocales: AppLocalizations.supportedLocales,
       home: const HomePage(),
     );
   }
@@ -97,9 +108,10 @@ class _HomePageState extends State<HomePage> {
     if (!mounted) return;
 
     final identity = device.identity;
+    final l = AppLocalizations.of(context)!;
     if (identity == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('デバイスから応答がありません (Mimic X 互換ではない可能性)')),
+        SnackBar(content: Text(l.deviceNotResponding)),
       );
       _midi.disconnect();
       return;
@@ -107,7 +119,7 @@ class _HomePageState extends State<HomePage> {
 
     if (identity.channels.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('使用可能なチャンネルがありません')),
+        SnackBar(content: Text(l.noChannelsAvailable)),
       );
       _midi.disconnect();
       return;
@@ -159,8 +171,9 @@ class _HomePageState extends State<HomePage> {
     }
 
     if (page == null) {
+      final l = AppLocalizations.of(context)!;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('未対応の機能です: ${ch.hidTypeLabel} / ${ch.targetLabel}')),
+        SnackBar(content: Text(l.unsupportedFunction(ch.hidTypeLabel, ch.targetLabel))),
       );
       _midi.disconnect();
       return;
@@ -173,21 +186,22 @@ class _HomePageState extends State<HomePage> {
   }
 
   void _showChannelPicker(MidiDeviceInfo device, DeviceIdentity identity) {
+    final l = AppLocalizations.of(context)!;
     showModalBottomSheet(
       context: context,
       builder: (ctx) => SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Padding(
-              padding: EdgeInsets.all(16),
-              child: Text('使用する機能を選択', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: Text(l.selectFunction, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             ),
             for (final ch in identity.channels)
               ListTile(
                 leading: Icon(_iconForType(ch.hidType)),
                 title: Text(ch.hidTypeLabel),
-                subtitle: Text('CH${ch.midiChannel + 1} - ${ch.targetLabel}'),
+                subtitle: Text(l.homeChannelLabel(ch.midiChannel + 1, ch.targetLabel)),
                 onTap: () {
                   Navigator.of(ctx).pop();
                   _routeToChannel(device, ch);
@@ -210,9 +224,10 @@ class _HomePageState extends State<HomePage> {
 
   @override
   Widget build(BuildContext context) {
+    final l = AppLocalizations.of(context)!;
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Mimic X'),
+        title: Text(l.appTitle),
         actions: [
           IconButton(
             icon: _scanning
@@ -222,28 +237,35 @@ class _HomePageState extends State<HomePage> {
                     child: CircularProgressIndicator(strokeWidth: 2),
                   )
                 : const Icon(Icons.refresh),
-            tooltip: '再スキャン',
+            tooltip: l.homeRescanTooltip,
             onPressed: _scanning ? null : _scanAndIdentify,
+          ),
+          IconButton(
+            icon: const Icon(Icons.info_outline),
+            tooltip: l.homeAboutTooltip,
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const AboutPage()),
+            ),
           ),
         ],
       ),
       body: _devices.isEmpty
           ? Center(
               child: _scanning
-                  ? const Column(
+                  ? Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        CircularProgressIndicator(),
-                        SizedBox(height: 16),
-                        Text('デバイスを検索中...'),
+                        const CircularProgressIndicator(),
+                        const SizedBox(height: 16),
+                        Text(l.homeSearching),
                       ],
                     )
-                  : const Padding(
-                      padding: EdgeInsets.all(32),
+                  : Padding(
+                      padding: const EdgeInsets.all(32),
                       child: Text(
-                        'デバイスが見つかりません\n\nUSB-MIDI デバイスを接続して、右上のリロードボタンを押してください',
+                        '${l.homeNoDevicesTitle}\n\n${l.homeNoDevicesHint}',
                         textAlign: TextAlign.center,
-                        style: TextStyle(color: Colors.grey),
+                        style: const TextStyle(color: Colors.grey),
                       ),
                     ),
             )
@@ -278,7 +300,10 @@ class _HomePageState extends State<HomePage> {
                                 if (identity != null) ...[
                                   const SizedBox(height: 4),
                                   Text(
-                                    'fw ${identity.firmwareVersion} (proto ${identity.protocolVersion})',
+                                    l.homeFirmwareVersion(
+                                      identity.firmwareVersion,
+                                      identity.protocolVersion,
+                                    ),
                                     style: const TextStyle(color: Colors.grey, fontSize: 12),
                                   ),
                                   const SizedBox(height: 4),
@@ -299,9 +324,9 @@ class _HomePageState extends State<HomePage> {
                                   ),
                                 ] else ...[
                                   const SizedBox(height: 4),
-                                  const Text(
-                                    'Mimic X 非対応 (応答なし)',
-                                    style: TextStyle(color: Colors.grey, fontSize: 12),
+                                  Text(
+                                    l.homeIncompatibleNote,
+                                    style: const TextStyle(color: Colors.grey, fontSize: 12),
                                   ),
                                 ],
                               ],
