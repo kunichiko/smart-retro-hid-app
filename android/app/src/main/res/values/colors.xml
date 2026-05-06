@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- アイコン foreground は不透明なので通常表示では見えないが、
+         Pixel ランチャーの parallax 効果や一部の遷移時にうっすら見える。
+         アイコン背景の青系統に近い色を入れておく。 -->
+    <color name="ic_launcher_background">#3D9CC4</color>
+</resources>
