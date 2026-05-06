@@ -3,9 +3,12 @@ import 'package:flutter/services.dart';
 import 'midi_service.dart';
 import 'protocol.dart';
 import 'joystick_page.dart';
+import 'joystick_settings.dart';
 import 'x68k_keyboard_page.dart';
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await JoystickSettings.instance.load();
   runApp(const SmartRetroHidApp());
 }
 
