@@ -3,9 +3,9 @@ import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'midi_service.dart';
 import 'joystick_settings.dart';
+import 'orientation_helper.dart';
 
 /// 連射対象の候補。設定シートの ON/OFF 表示順序もこの順。
 const List<({int note, String label})> _turboCandidates = [
@@ -40,11 +40,8 @@ class _JoystickPageState extends State<JoystickPage> {
   @override
   void initState() {
     super.initState();
-    // 横向き固定
-    SystemChrome.setPreferredOrientations([
-      DeviceOrientation.landscapeLeft,
-      DeviceOrientation.landscapeRight,
-    ]);
+    // 横向き固定 (Android では auto-rotate ロックを無視して両方向許容)
+    OrientationHelper.landscape();
     _settings.addListener(_onSettingsChanged);
   }
 
@@ -91,9 +88,19 @@ class _JoystickPageState extends State<JoystickPage> {
           const SizedBox(width: 12),
         ],
       ),
-      body: _mode == PadMode.atari
-          ? _AtariLayout(midi: widget.midi, settings: _settings)
-          : _Md6Layout(midi: widget.midi, settings: _settings),
+      // OS の回転がまだ完了していない過渡フレームでは portrait の幅で
+      // レイアウトが組まれて RenderFlex がオーバーフローするので、
+      // landscape になるまで描画を保留する。
+      body: OrientationBuilder(
+        builder: (context, orientation) {
+          if (orientation != Orientation.landscape) {
+            return const SizedBox.expand();
+          }
+          return _mode == PadMode.atari
+              ? _AtariLayout(midi: widget.midi, settings: _settings)
+              : _Md6Layout(midi: widget.midi, settings: _settings);
+        },
+      ),
     );
   }
 }

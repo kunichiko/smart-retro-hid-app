@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'midi_service.dart';
 import 'protocol.dart';
 import 'joystick_page.dart';
 import 'joystick_settings.dart';
+import 'orientation_helper.dart';
 import 'x68k_keyboard_page.dart';
 
 void main() async {
@@ -47,9 +47,7 @@ class _HomePageState extends State<HomePage> {
   void initState() {
     super.initState();
     // ホーム画面はポートレート固定
-    SystemChrome.setPreferredOrientations([
-      DeviceOrientation.portraitUp,
-    ]);
+    OrientationHelper.portrait();
 
     _midi.onDisconnect = () {
       if (mounted) setState(() {});
@@ -171,9 +169,7 @@ class _HomePageState extends State<HomePage> {
     await Navigator.of(context).push(MaterialPageRoute(builder: (_) => page!));
     // 戻ってきたら切断 + ポートレート復帰
     _midi.disconnect();
-    SystemChrome.setPreferredOrientations([
-      DeviceOrientation.portraitUp,
-    ]);
+    OrientationHelper.portrait();
   }
 
   void _showChannelPicker(MidiDeviceInfo device, DeviceIdentity identity) {

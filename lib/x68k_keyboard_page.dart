@@ -9,6 +9,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'midi_service.dart';
+import 'orientation_helper.dart';
 
 class X68kKeyboardPage extends StatefulWidget {
   final MidiService midi;
@@ -135,10 +136,7 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
   @override
   void initState() {
     super.initState();
-    SystemChrome.setPreferredOrientations([
-      DeviceOrientation.landscapeLeft,
-      DeviceOrientation.landscapeRight,
-    ]);
+    OrientationHelper.landscape();
 
     _prevTargetRxHandler = widget.midi.onTargetRx;
     widget.midi.onTargetRx = _handleTargetRx;
