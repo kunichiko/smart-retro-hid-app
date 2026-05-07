@@ -269,7 +269,7 @@ abstract class AppLocalizations {
   /// No description provided for @aboutAppDescription.
   ///
   /// In en, this message translates to:
-  /// **'USB-MIDI controller app for retro PC HID emulation. Use a smartphone as a joystick or keyboard for X68000 / ATARI / Mega Drive via the Mimic X device.'**
+  /// **'USB-MIDI controller app for retro PC HID emulation. Use a smartphone as a joystick or keyboard for X68000 / MSX via the Mimic X device.'**
   String get aboutAppDescription;
 
   /// No description provided for @aboutVersion.

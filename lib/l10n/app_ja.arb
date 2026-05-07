@@ -38,7 +38,7 @@
   "x68kKeyboardTitle": "X68000 Keyboard",
 
   "aboutTitle": "このアプリについて",
-  "aboutAppDescription": "Mimic X デバイスを介して、スマートフォンをレトロ PC (X68000 / ATARI / メガドライブ等) のジョイスティックやキーボードとして使うための USB-MIDI コントローラアプリです。",
+  "aboutAppDescription": "Mimic X デバイスを介して、スマートフォンをレトロ PC (X68000 / MSX等) のジョイスティックやキーボードとして使うための USB-MIDI コントローラアプリです。",
   "aboutVersion": "バージョン {version} ({build})",
   "aboutLicensesButton": "オープンソースライセンス",
   "aboutCopyright": "© 2026 Kunihiko Ohnaka"
