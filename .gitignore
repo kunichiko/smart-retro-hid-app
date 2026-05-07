@@ -11,6 +11,10 @@ build/
 .pub-cache/
 .pub/
 
+# FVM (Flutter SDK バージョン固定。.fvmrc は commit するが、ローカル symlink
+# (.fvm/flutter_sdk) と関連メタデータはホスト依存なので無視する)
+.fvm/
+
 # IDE
 .idea/
 .vscode/
