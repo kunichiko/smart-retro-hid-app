@@ -3,6 +3,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'l10n/app_localizations.dart';
 import 'midi_service.dart';
 import 'joystick_settings.dart';
@@ -123,9 +124,16 @@ class _DPad extends StatefulWidget {
 class _DPadState extends State<_DPad> {
   bool _up = false, _down = false, _left = false, _right = false;
 
+  /// 指が現在 dead zone (中央の不感領域) に入っているか。スクリーン上には
+  /// 物理的な突起がないので、中央位置を触覚で示すために、外 → 中の遷移時
+  /// (= 全方向 OFF に変わった瞬間と、最初に dead zone をタップした瞬間) に
+  /// 軽い振動を返す。中 → 外への遷移は無音。
+  bool _inDeadZone = false;
+
   void _updateDirection(Offset? localPos, double size) {
     if (localPos == null) {
       _setAll(false, false, false, false);
+      _inDeadZone = false;  // 指が離れた → 次回の侵入で再度フィードバック
       return;
     }
     final center = size / 2;
@@ -137,6 +145,13 @@ class _DPadState extends State<_DPad> {
     final newDown = dy > deadZone;
     final newLeft = dx < -deadZone;
     final newRight = dx > deadZone;
+
+    final nowInDeadZone = !newUp && !newDown && !newLeft && !newRight;
+    if (nowInDeadZone && !_inDeadZone) {
+      HapticFeedback.lightImpact();
+    }
+    _inDeadZone = nowInDeadZone;
+
     _setAll(newUp, newDown, newLeft, newRight);
   }
 
