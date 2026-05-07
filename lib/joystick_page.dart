@@ -346,6 +346,12 @@ class _ButtonGroupState extends State<_ButtonGroup> {
     final entered = newActive.difference(_activeNotes);
     final exited = _activeNotes.difference(newActive);
 
+    // 新しく押下されたボタンがあれば触覚フィードバック (1 フレームに何個入っても
+    // 1 回だけ。turbo の連射 tick では鳴らさない)。
+    if (entered.isNotEmpty) {
+      HapticFeedback.lightImpact();
+    }
+
     // 指が乗った: 即時 press。turbo 対象なら以降タイマーで toggle する。
     for (final note in entered) {
       widget.midi.joystickPress(note);
