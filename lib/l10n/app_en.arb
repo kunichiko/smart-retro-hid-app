@@ -67,7 +67,7 @@
   "x68kKeyboardTitle": "X68000 Keyboard",
 
   "aboutTitle": "About",
-  "aboutAppDescription": "USB-MIDI controller app for retro PC HID emulation. Use a smartphone as a joystick or keyboard for X68000 / ATARI / Mega Drive via the Mimic X device.",
+  "aboutAppDescription": "USB-MIDI controller app for retro PC HID emulation. Use a smartphone as a joystick or keyboard for X68000 / MSX via the Mimic X device.",
   "aboutVersion": "Version {version} ({build})",
   "@aboutVersion": {
     "placeholders": {

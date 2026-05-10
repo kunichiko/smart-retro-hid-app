@@ -108,7 +108,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get aboutAppDescription =>
-      'Mimic X デバイスを介して、スマートフォンをレトロ PC (X68000 / ATARI / メガドライブ等) のジョイスティックやキーボードとして使うための USB-MIDI コントローラアプリです。';
+      'Mimic X デバイスを介して、スマートフォンをレトロ PC (X68000 / MSX等) のジョイスティックやキーボードとして使うための USB-MIDI コントローラアプリです。';
 
   @override
   String aboutVersion(String version, String build) {

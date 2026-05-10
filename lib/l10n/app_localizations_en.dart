@@ -112,7 +112,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get aboutAppDescription =>
-      'USB-MIDI controller app for retro PC HID emulation. Use a smartphone as a joystick or keyboard for X68000 / ATARI / Mega Drive via the Mimic X device.';
+      'USB-MIDI controller app for retro PC HID emulation. Use a smartphone as a joystick or keyboard for X68000 / MSX via the Mimic X device.';
 
   @override
   String aboutVersion(String version, String build) {
