@@ -125,7 +125,10 @@ class _HomePageState extends State<HomePage> {
       return;
     }
 
-    // X68000 のキーボード+マウス両方が割り当て済みなら統合ビュー直行
+    // X68000 の keyboard と mouse は 1 つの "X68000 キーボード (トラックパッド付き)"
+    // 画面に同居するため、ピッカーでは 1 項目に集約する。
+    // 例: combined ボード (joystick + x68k_kb + x68k_mouse の 3ch) では
+    //     ピッカーは Joystick / X68000 Keyboard の 2 択になる。
     final x68kKb = identity.channels
         .cast<ChannelAssignment?>()
         .firstWhere(
@@ -138,16 +141,23 @@ class _HomePageState extends State<HomePage> {
           (c) => c!.hidType == HidType.mouse && c.targetSystem == TargetSystem.x68000,
           orElse: () => null,
         );
-    final isX68kCombo = x68kKb != null &&
-        x68kMouse != null &&
-        identity.channels.length == 2;
+    final hasX68kCombo = x68kKb != null && x68kMouse != null;
 
-    if (isX68kCombo) {
-      _routeToChannel(device, x68kKb);
-    } else if (identity.channels.length == 1) {
-      _routeToChannel(device, identity.channels.first);
+    final pickerChannels = identity.channels.where((c) {
+      // x68k mouse は kb と同居している場合は kb 側の画面に統合されるので、
+      // ピッカーには出さない。
+      if (hasX68kCombo &&
+          c.hidType == HidType.mouse &&
+          c.targetSystem == TargetSystem.x68000) {
+        return false;
+      }
+      return true;
+    }).toList();
+
+    if (pickerChannels.length == 1) {
+      _routeToChannel(device, pickerChannels.first);
     } else {
-      _showChannelPicker(device, identity);
+      _showChannelPicker(device, pickerChannels);
     }
   }
 
@@ -185,7 +195,10 @@ class _HomePageState extends State<HomePage> {
     OrientationHelper.portrait();
   }
 
-  void _showChannelPicker(MidiDeviceInfo device, DeviceIdentity identity) {
+  void _showChannelPicker(
+    MidiDeviceInfo device,
+    List<ChannelAssignment> channels,
+  ) {
     final l = AppLocalizations.of(context)!;
     showModalBottomSheet(
       context: context,
@@ -197,7 +210,7 @@ class _HomePageState extends State<HomePage> {
               padding: const EdgeInsets.all(16),
               child: Text(l.selectFunction, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             ),
-            for (final ch in identity.channels)
+            for (final ch in channels)
               ListTile(
                 leading: Icon(_iconForType(ch.hidType)),
                 title: Text(ch.hidTypeLabel),
