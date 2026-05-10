@@ -21,6 +21,8 @@ class MidiDeviceInfo {
 class MidiService {
   final MidiCommand _midiCommand = MidiCommand();
   StreamSubscription<MidiPacket>? _rxSubscription;
+  // 現在接続中の MidiDevice (disconnect 時にデバイス指定で切断するため保持)
+  MidiDevice? _connectedDevice;
   VoidCallback? onDisconnect;
 
   // チャンネル割り当てを SysEx で受信したら通知
@@ -68,6 +70,7 @@ class MidiService {
   Future<bool> connect(MidiDeviceInfo deviceInfo) async {
     try {
       await _midiCommand.connectToDevice(deviceInfo.device);
+      _connectedDevice = deviceInfo.device;
       _rxSubscription = _midiCommand.onMidiDataReceived?.listen(_onMidiReceived);
       return true;
     } catch (e) {
@@ -128,10 +131,20 @@ class MidiService {
     // TODO: capability response, status notifications
   }
 
+  /// 個別デバイスを切断する。MIDI サブシステム自体は維持されるので、その後
+  /// 同じインスタンスで再 scan / connect が可能。teardown は dispose 時のみ。
+  ///
+  /// teardown を毎回呼ぶと Android の MidiManager 登録状態が壊れて、
+  /// 再接続後に IDENTIFY_RESPONSE が返ってこなくなる ("Not Mimic X compatible
+  /// (no response)") ため、ここでは disconnectDevice のみ呼ぶ。
   void disconnect() {
     _rxSubscription?.cancel();
     _rxSubscription = null;
-    _midiCommand.teardown();
+    final dev = _connectedDevice;
+    if (dev != null) {
+      _connectedDevice = null;
+      _midiCommand.disconnectDevice(dev);
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -169,7 +182,10 @@ class MidiService {
   void joystickRelease(int note, {int channel = chJoystickDefault}) =>
       sendNoteOff(channel, note);
 
+  /// MidiService 自体を破棄する。アプリ終了時に 1 度だけ呼ぶ想定。
+  /// teardown は MIDI サブシステム全体を解放するため、ここでだけ呼ぶ。
   void dispose() {
     disconnect();
+    _midiCommand.teardown();
   }
 }
