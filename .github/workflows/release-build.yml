@@ -411,6 +411,9 @@ jobs:
       MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
       MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
       KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+      APPSTORE_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
+      APPSTORE_KEY_ID: ${{ secrets.APPSTORE_KEY_ID }}
+      APPSTORE_PRIVATE_KEY: ${{ secrets.APPSTORE_PRIVATE_KEY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -429,14 +432,16 @@ jobs:
         run: flutter analyze --no-fatal-infos
 
       - name: Install macOS signing certificate
-        if: env.MACOS_CERTIFICATE_BASE64 != ''
         shell: bash
         run: |
           set -euo pipefail
-          if [ -z "${MACOS_CERTIFICATE_PASSWORD:-}" ] || [ -z "${KEYCHAIN_PASSWORD:-}" ]; then
-            echo "::error::MACOS_CERTIFICATE_PASSWORD and KEYCHAIN_PASSWORD are required when MACOS_CERTIFICATE_BASE64 is set"
-            exit 1
-          fi
+
+          for name in MACOS_CERTIFICATE_BASE64 MACOS_CERTIFICATE_PASSWORD KEYCHAIN_PASSWORD; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::GitHub Secret ${name} is required for macOS Developer ID signing and notarization"
+              exit 1
+            fi
+          done
 
           CERTIFICATE_PATH="${RUNNER_TEMP}/macos-signing.p12"
           KEYCHAIN_PATH="${RUNNER_TEMP}/macos-signing.keychain-db"
@@ -449,11 +454,74 @@ jobs:
           security list-keychain -d user -s "${KEYCHAIN_PATH}" login.keychain-db
           security set-key-partition-list -S apple-tool:,apple: -s -k "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
 
+          SIGN_IDENTITY=$(security find-identity -v -p codesigning "${KEYCHAIN_PATH}" | sed -n 's/.*"\(Developer ID Application:.*\)".*/\1/p' | head -n 1)
+          if [ -z "${SIGN_IDENTITY}" ]; then
+            echo "::error::MACOS_CERTIFICATE_BASE64 must contain a Developer ID Application certificate"
+            exit 1
+          fi
+
+          echo "MACOS_KEYCHAIN_PATH=${KEYCHAIN_PATH}" >> "${GITHUB_ENV}"
+          echo "MACOS_SIGN_IDENTITY=${SIGN_IDENTITY}" >> "${GITHUB_ENV}"
+
       - name: Build macOS release
         run: >
           flutter build macos --release
           --build-name=${{ needs.prepare.outputs.app_version }}
           --build-number=${{ needs.prepare.outputs.build_number }}
+
+      - name: Sign and notarize macOS app
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for name in APPSTORE_ISSUER_ID APPSTORE_KEY_ID APPSTORE_PRIVATE_KEY; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::GitHub Secret ${name} is required for macOS notarization"
+              exit 1
+            fi
+          done
+
+          APP_PATH="build/macos/Build/Products/Release/Mimic X.app"
+          NOTARY_ZIP="${RUNNER_TEMP}/MimicX_macos-notary.zip"
+          KEY_DIR="${HOME}/.appstoreconnect/private_keys"
+          KEY_PATH="${KEY_DIR}/AuthKey_${APPSTORE_KEY_ID}.p8"
+
+          mkdir -p "${KEY_DIR}"
+          if [[ "${APPSTORE_PRIVATE_KEY}" == *"BEGIN PRIVATE KEY"* ]]; then
+            printf '%s' "${APPSTORE_PRIVATE_KEY}" | perl -pe 's/\\n/\n/g; s/\r$//' > "${KEY_PATH}"
+          else
+            printf '%s' "${APPSTORE_PRIVATE_KEY}" | base64 --decode > "${KEY_PATH}"
+          fi
+          if ! grep -q "BEGIN PRIVATE KEY" "${KEY_PATH}"; then
+            echo "::error::APPSTORE_PRIVATE_KEY must be the contents of the App Store Connect API key .p8 file, or its base64-encoded value"
+            exit 1
+          fi
+          chmod 600 "${KEY_PATH}"
+
+          if [ -d "${APP_PATH}/Contents/Frameworks" ]; then
+            while IFS= read -r library; do
+              codesign --force --timestamp --options runtime --sign "${MACOS_SIGN_IDENTITY}" "${library}"
+            done < <(find "${APP_PATH}/Contents/Frameworks" -type f \( -name '*.dylib' -o -name '*.so' \))
+
+            while IFS= read -r framework; do
+              codesign --force --timestamp --options runtime --sign "${MACOS_SIGN_IDENTITY}" "${framework}"
+            done < <(find "${APP_PATH}/Contents/Frameworks" -type d -name '*.framework' | sort -r)
+          fi
+
+          codesign --force --timestamp --options runtime \
+            --entitlements macos/Runner/Release.entitlements \
+            --sign "${MACOS_SIGN_IDENTITY}" \
+            "${APP_PATH}"
+          codesign --verify --deep --strict --verbose=2 "${APP_PATH}"
+
+          ditto -c -k --sequesterRsrc --keepParent "${APP_PATH}" "${NOTARY_ZIP}"
+          xcrun notarytool submit "${NOTARY_ZIP}" \
+            --key "${KEY_PATH}" \
+            --key-id "${APPSTORE_KEY_ID}" \
+            --issuer "${APPSTORE_ISSUER_ID}" \
+            --wait
+          xcrun stapler staple "${APP_PATH}"
+          xcrun stapler validate "${APP_PATH}"
 
       - name: Package macOS zip
         id: package
