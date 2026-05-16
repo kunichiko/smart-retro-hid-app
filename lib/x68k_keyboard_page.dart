@@ -15,6 +15,7 @@ import 'midi_service.dart';
 import 'mode_scaffold.dart';
 import 'orientation_helper.dart';
 import 'sjis_encoder.dart';
+import 'x68k_shared_state.dart';
 
 // ===========================================================================
 // X68kKeyboardPage 本体
@@ -41,26 +42,60 @@ class X68kKeyboardPage extends StatefulWidget {
 }
 
 class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
+  /// Standard / LineInput 共通の状態 (LED 点灯、輝度、キーリピート設定)。
+  /// onTargetRx ハンドラは page 自身が握って shared に流す。
+  late final X68kKeyboardSharedState _shared;
   late final List<ChannelMode> _modes;
 
   @override
   void initState() {
     super.initState();
     OrientationHelper.landscape();
+    _shared = X68kKeyboardSharedState();
+    // TARGET_RX を page で受けて shared に転送する。冪等パターン (既に同じ
+    // closure なら触らない / dispose 時は自分がまだ active な時のみクリア)。
+    widget.midi.onTargetRx = _onTargetRx;
     _modes = [
       StandardX68kMode(
         channel: widget.channel,
         mouseChannel: widget.mouseChannel,
+        shared: _shared,
       ),
-      LineInputMode(channel: widget.channel),
+      LineInputMode(channel: widget.channel, shared: _shared),
     ];
+    // 起動直後に LED 状態を本体と同期: 7 つの LED トグルキーを 2 回ずつ押し、
+    // 1 回ごとに X68000 が返してくる LED 制御コマンドを shared に取り込む。
+    // 計 14 回押すと X68000 側のキーボード状態は net で元に戻り、shared は
+    // 最新の LED 状態を観測完了している。
+    Future.delayed(const Duration(milliseconds: 500), _syncLedState);
+  }
+
+  void _onTargetRx(int midiChannel, int byte) {
+    if (midiChannel != widget.channel) return;
+    _shared.handleTargetRxByte(byte);
+  }
+
+  Future<void> _syncLedState() async {
+    for (int round = 0; round < 2; round++) {
+      for (final sc in X68kKeyboardSharedState.ledBitToScancode) {
+        if (!mounted) return;
+        widget.midi.sendNoteOn(widget.channel, sc, 127);
+        await Future.delayed(const Duration(milliseconds: 15));
+        widget.midi.sendNoteOff(widget.channel, sc);
+        await Future.delayed(const Duration(milliseconds: 30));
+      }
+    }
   }
 
   @override
   void dispose() {
+    if (widget.midi.onTargetRx == _onTargetRx) {
+      widget.midi.onTargetRx = null;
+    }
     for (final m in _modes) {
       m.dispose();
     }
+    _shared.dispose();
     super.dispose();
   }
 
@@ -84,6 +119,7 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
 class StandardX68kMode extends ChannelMode {
   final int channel;
   final int? mouseChannel;
+  final X68kKeyboardSharedState shared;
 
   bool _numpadVisible = true;
   bool _trackpadVisible = true;
@@ -93,7 +129,11 @@ class StandardX68kMode extends ChannelMode {
   /// このコントローラを購読することで表示可否を切り替える。
   final StickyKeyController stickyController = StickyKeyController();
 
-  StandardX68kMode({required this.channel, this.mouseChannel});
+  StandardX68kMode({
+    required this.channel,
+    this.mouseChannel,
+    required this.shared,
+  });
 
   @override
   String get id => 'x68k_keyboard.standard';
@@ -132,6 +172,7 @@ class StandardX68kMode extends ChannelMode {
         numpadVisible: _numpadVisible,
         trackpadVisible: _trackpadVisible,
         stickyController: stickyController,
+        shared: shared,
       ),
     );
   }
@@ -242,6 +283,7 @@ class _X68kKeyboardBody extends StatefulWidget {
   final bool numpadVisible;
   final bool trackpadVisible;
   final StickyKeyController stickyController;
+  final X68kKeyboardSharedState shared;
 
   const _X68kKeyboardBody({
     required this.midi,
@@ -250,6 +292,7 @@ class _X68kKeyboardBody extends StatefulWidget {
     required this.numpadVisible,
     required this.trackpadVisible,
     required this.stickyController,
+    required this.shared,
   });
 
   @override
@@ -259,22 +302,6 @@ class _X68kKeyboardBody extends StatefulWidget {
 class _X68kKeyboardBodyState extends State<_X68kKeyboardBody> {
   // 押下中のキー (重複送信防止用)
   final Set<int> _pressed = {};
-
-  // X68000 LED 制御コマンド (bit7=1) の各ビット → 対応キーのスキャンコード
-  //   bit0: かな, bit1: ローマ字, bit2: コード入力, bit3: CAPS,
-  //   bit4: INS,  bit5: ひらがな, bit6: 全角
-  // X68000 のビット意味は「0=点灯, 1=消灯」
-  static const List<int> _ledBitToScancode = [
-    0x5A, // bit0 かな
-    0x5B, // bit1 ローマ字
-    0x5C, // bit2 コード入力
-    0x5D, // bit3 CAPS
-    0x5E, // bit4 INS
-    0x5F, // bit5 ひらがな
-    0x60, // bit6 全角
-  ];
-  // scancode → 点灯/消灯
-  final Set<int> _ledOn = {};
 
   // ひらがな・全角は緑、それ以外 (かな/ローマ字/コード入力/CAPS/INS) は赤
   static const Set<int> _greenLedScancodes = {0x5F, 0x60};
@@ -320,10 +347,9 @@ class _X68kKeyboardBodyState extends State<_X68kKeyboardBody> {
   };
 
   // キーリピート (X68000 の SET REPEAT START / RATE コマンドで可変)
+  // delay / interval は shared.repeatDelayMs / repeatIntervalMs を参照する。
   Timer? _repeatTimer;
   int? _repeatScancode;
-  int _repeatDelayMs = 500;     // 0b0110dddd: 200 + dddd*100 ms (default dddd=3)
-  int _repeatIntervalMs = 110;  // 0b0111rrrr: 30 + rrrr²*5 ms (default rrrr=4)
 
   // リピートさせないキー (モディファイア / LED トグル系)
   //   0x5A: かな        0x5B: ローマ字    0x5C: コード入力
@@ -343,9 +369,8 @@ class _X68kKeyboardBodyState extends State<_X68kKeyboardBody> {
   // ポップアップは Overlay にエントリを差し込んで AppBar 含む最上層に描画する
   final Map<int, OverlayEntry> _popupOverlays = {};
 
-  // LED 輝度 (0b010101xx: xx=00 最も明るい, xx=11 最も暗い)
+  // LED 輝度に応じた減衰係数 (0b010101xx: xx=00 最も明るい, xx=11 最も暗い)
   // xx=00 → factor 1.0, xx=11 → factor 0.25
-  int _ledBrightness = 0;
   static const List<double> _brightnessFactors = [1.0, 0.7, 0.45, 0.25];
 
   // ポップアップで使う基本ユニットサイズ (LayoutBuilder で更新)
@@ -355,20 +380,20 @@ class _X68kKeyboardBodyState extends State<_X68kKeyboardBody> {
   void initState() {
     super.initState();
     // 横向き固定は外側の X68kKeyboardPage で済ませてある。
-    // onTargetRx は冪等パターンで設定する (chain による stale reference を防ぐ)。
-    widget.midi.onTargetRx = _handleTargetRx;
+    // onTargetRx は page が握って shared に流すので body 側では関与しない。
 
     // AppBar の "全解除" ボタンから呼ばれるコールバックを登録。
     widget.stickyController.onReleaseAllRequested = _releaseAllStuck;
-    // sticky 状態が変わったらキー描画を更新する。
-    widget.stickyController.addListener(_onStickyChanged);
+    // sticky 状態 / shared (LED / 輝度) が変わったらキー描画を更新する。
+    widget.stickyController.addListener(_onSharedChanged);
+    widget.shared.addListener(_onSharedChanged);
 
     // デスクトップ / 外付け物理キーボードからのキーイベントを購読する。
     // Focus を介さない全域ハンドラなので AppBar 操作中でもキーが拾える。
     HardwareKeyboard.instance.addHandler(_handlePhysicalKey);
   }
 
-  void _onStickyChanged() {
+  void _onSharedChanged() {
     if (mounted) setState(() {});
   }
 
@@ -384,14 +409,11 @@ class _X68kKeyboardBodyState extends State<_X68kKeyboardBody> {
       entry.remove();
     }
     _popupOverlays.clear();
-    // 自分が現在の onTargetRx ならクリア。別モードが既に設定済みなら触らない。
-    if (widget.midi.onTargetRx == _handleTargetRx) {
-      widget.midi.onTargetRx = null;
-    }
     // 退場時に sticky で残っている分を全て NoteOff してから controller を切る。
     _releaseAllStuck();
-    widget.stickyController.removeListener(_onStickyChanged);
+    widget.stickyController.removeListener(_onSharedChanged);
     widget.stickyController.onReleaseAllRequested = null;
+    widget.shared.removeListener(_onSharedChanged);
     HardwareKeyboard.instance.removeHandler(_handlePhysicalKey);
     super.dispose();
   }
@@ -617,45 +639,9 @@ class _X68kKeyboardBodyState extends State<_X68kKeyboardBody> {
     }
   }
 
-  // ターゲット機 (X68000) から届いた生バイトを解釈する
-  void _handleTargetRx(int midiChannel, int byte) {
-    if (midiChannel != widget.channel) return;
-
-    if ((byte & 0x80) != 0) {
-      // LED 制御コマンド: bit7=1, bit6..0 が各 LED 状態 (0=点灯, 1=消灯)
-      setState(() {
-        for (int i = 0; i < _ledBitToScancode.length; i++) {
-          final lit = ((byte >> i) & 1) == 0;
-          final sc = _ledBitToScancode[i];
-          if (lit) {
-            _ledOn.add(sc);
-          } else {
-            _ledOn.remove(sc);
-          }
-        }
-      });
-      return;
-    }
-    if ((byte & 0xF0) == 0x60) {
-      // 0b0110dddd: キーリピート開始遅延 (200 + dddd × 100 ms)
-      final n = byte & 0x0F;
-      _repeatDelayMs = 200 + n * 100;
-      return;
-    }
-    if ((byte & 0xF0) == 0x70) {
-      // 0b0111rrrr: キーリピート間隔 (30 + rrrr² × 5 ms)
-      final n = byte & 0x0F;
-      _repeatIntervalMs = 30 + n * n * 5;
-      return;
-    }
-    if ((byte & 0xFC) == 0x54) {
-      // 0b010101xx: LED 輝度 (xx=00 最も明るい, xx=11 最も暗い)
-      setState(() {
-        _ledBrightness = byte & 0x03;
-      });
-      return;
-    }
-  }
+  // ターゲット機からの生バイト処理は X68kKeyboardPage が一括して shared に
+  // 流す方式に変更したため、body 内の _handleTargetRx は撤廃。
+  // LED 状態 / 輝度 / リピート設定は widget.shared から参照する。
 
   void _press(int code, BuildContext keyCtx, List<String> labels) {
     if (_pressed.add(code)) {
@@ -770,20 +756,21 @@ class _X68kKeyboardBodyState extends State<_X68kKeyboardBody> {
     );
   }
 
-  // 押下から _repeatDelayMs 経過したらリピート開始
+  // 押下から shared.repeatDelayMs 経過したらリピート開始
   void _scheduleRepeat(int code) {
     _repeatTimer?.cancel();
     _repeatScancode = code;
-    _repeatTimer = Timer(Duration(milliseconds: _repeatDelayMs), () {
+    _repeatTimer =
+        Timer(Duration(milliseconds: widget.shared.repeatDelayMs), () {
       if (!_pressed.contains(code)) return;
       _startRepeating(code);
     });
   }
 
-  // _repeatIntervalMs 間隔で Note On を撃ち続ける (firmware 側は make コードを再送)
+  // shared.repeatIntervalMs 間隔で Note On を撃ち続ける (firmware 側は make コードを再送)
   void _startRepeating(int code) {
     _repeatTimer = Timer.periodic(
-      Duration(milliseconds: _repeatIntervalMs),
+      Duration(milliseconds: widget.shared.repeatIntervalMs),
       (_) {
         if (!_pressed.contains(code)) {
           _repeatTimer?.cancel();
@@ -1184,16 +1171,16 @@ class _X68kKeyboardBodyState extends State<_X68kKeyboardBody> {
   Widget _keyMulti(List<String> labels, int scancode, double width, double height) {
     final pressed = _pressed.contains(scancode);
     final stuck = widget.stickyController.isStuck(scancode);
-    final ledOn = _ledOn.contains(scancode);
-    final hasLed = _ledBitToScancode.contains(scancode);
+    final ledOn = widget.shared.isLedOn(scancode);
+    final hasLed = X68kKeyboardSharedState.ledBitToScancode.contains(scancode);
 
     // 表示ラベル切替:
     //   かな ON + ひらがな ON  → ひらがな
     //   かな ON + ひらがな OFF → カタカナ
     //   かな OFF + SHIFT       → JIS 記号 (1-0 段、,./)
     //   それ以外               → 通常の英数記号
-    final kanaActive = _ledOn.contains(0x5A);
-    final hiraganaActive = _ledOn.contains(0x5F);
+    final kanaActive = widget.shared.isLedOn(0x5A);
+    final hiraganaActive = widget.shared.isLedOn(0x5F);
     final shiftPressed = _pressed.contains(0x70);
     String? overrideLabel;
     if (kanaActive) {
@@ -1272,7 +1259,7 @@ class _X68kKeyboardBodyState extends State<_X68kKeyboardBody> {
                         height: 6,
                         decoration: BoxDecoration(
                           color: ledOn
-                              ? _applyBrightness(ledColor, _ledBrightness)
+                              ? _applyBrightness(ledColor, widget.shared.ledBrightness)
                               : ledColorDim,
                           borderRadius: const BorderRadius.only(
                             topLeft: Radius.circular(1),
@@ -1281,7 +1268,7 @@ class _X68kKeyboardBodyState extends State<_X68kKeyboardBody> {
                           boxShadow: ledOn
                               ? [
                                   BoxShadow(
-                                    color: _applyBrightness(ledGlow, _ledBrightness),
+                                    color: _applyBrightness(ledGlow, widget.shared.ledBrightness),
                                     blurRadius: 5,
                                     spreadRadius: 0.5,
                                   ),
@@ -1551,24 +1538,10 @@ class _TrackpadSurfaceState extends State<_TrackpadSurface> {
 
 class LineInputMode extends ChannelMode {
   final int channel;
+  final X68kKeyboardSharedState shared;
   final TextEditingController _controller = TextEditingController();
 
-  /// X68000 から届く LED 制御コマンドで更新される LED 状態。送信前リセット用。
-  /// 本モードがアクティブな間だけ track する (StandardX68kMode と独立)。
-  final Set<int> _ledOn = <int>{};
-
-  LineInputMode({required this.channel});
-
-  // LED bit (0..6) → 対応スキャンコード。StandardX68kMode と同じ並び。
-  static const List<int> _ledBitToScancode = [
-    0x5A, // bit0 かな
-    0x5B, // bit1 ローマ字
-    0x5C, // bit2 コード入力
-    0x5D, // bit3 CAPS
-    0x5E, // bit4 INS
-    0x5F, // bit5 ひらがな
-    0x60, // bit6 全角
-  ];
+  LineInputMode({required this.channel, required this.shared});
 
   @override
   String get id => 'x68k_keyboard.lineInput';
@@ -1577,43 +1550,12 @@ class LineInputMode extends ChannelMode {
   String label(BuildContext context) => 'ライン入力';
 
   @override
-  Future<void> onEnter(MidiService midi) async {
-    // 冪等パターンで onTargetRx を設定 (chain による stale reference を防ぐ)。
-    midi.onTargetRx = _onTargetRx;
-  }
-
-  @override
-  Future<void> onExit(MidiService midi) async {
-    // 自分が現在の onTargetRx ならクリア。別モードが既に設定済みなら触らない。
-    if (midi.onTargetRx == _onTargetRx) {
-      midi.onTargetRx = null;
-    }
-  }
-
-  void _onTargetRx(int midiChannel, int byte) {
-    if (midiChannel != channel) return;
-    if ((byte & 0x80) != 0) {
-      // LED 制御: bit7=1, bit6..0 が各 LED 状態 (X68k は 0=点灯, 1=消灯)
-      for (int i = 0; i < _ledBitToScancode.length; i++) {
-        final lit = ((byte >> i) & 1) == 0;
-        final sc = _ledBitToScancode[i];
-        if (lit) {
-          _ledOn.add(sc);
-        } else {
-          _ledOn.remove(sc);
-        }
-      }
-    }
-    // repeat delay / interval / brightness は LineInputMode では使わないので無視。
-  }
-
-  @override
   Widget buildBody(BuildContext context, MidiService midi) {
     return _LineInputBody(
       midi: midi,
       channel: channel,
       controller: _controller,
-      ledOnSnapshot: () => Set<int>.unmodifiable(_ledOn),
+      shared: shared,
     );
   }
 
@@ -1628,13 +1570,13 @@ class _LineInputBody extends StatefulWidget {
   final MidiService midi;
   final int channel;
   final TextEditingController controller;
-  final Set<int> Function() ledOnSnapshot;
+  final X68kKeyboardSharedState shared;
 
   const _LineInputBody({
     required this.midi,
     required this.channel,
     required this.controller,
-    required this.ledOnSnapshot,
+    required this.shared,
   });
 
   @override
@@ -1863,7 +1805,7 @@ class _LineInputBodyState extends State<_LineInputBody> {
     await Future.delayed(_intraKeyDelay);
 
     // 観測中の LED が点灯している toggle key を押してオフに戻す。
-    final leds = widget.ledOnSnapshot();
+    final leds = widget.shared.ledOn;
     debugPrint('[LineInput] reset: ledOn snapshot = '
         '${leds.map((c) => '0x${c.toRadixString(16)}').join(',')}');
     for (final code in _toggleKeysToClear) {
