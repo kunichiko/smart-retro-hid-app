@@ -84,6 +84,16 @@ class _HomePageState extends State<HomePage> {
         dev.identity = await _midi.identifyDevice(
           timeout: const Duration(milliseconds: 500),
         );
+        // macOS の flutter_midi_command は connectToDevice の result(nil) を
+        // CoreMIDI ポート open 完了前に返すことがあり、Combined デバイスのように
+        // 入出力 + 複数 channel を持つデバイスでは初回 IDENTIFY を取りこぼす。
+        // 一度だけ短い猶予を空けてリトライする。
+        if (dev.identity == null) {
+          await Future.delayed(const Duration(milliseconds: 200));
+          dev.identity = await _midi.identifyDevice(
+            timeout: const Duration(milliseconds: 500),
+          );
+        }
       } catch (_) {
         // 識別失敗は無視 (Mimic X 以外のデバイスかも)
       }
