@@ -511,12 +511,40 @@ class _X68kKeyboardBodyState extends State<_X68kKeyboardBody> {
     LogicalKeyboardKey.pageUp: 0x38,    // ROLL UP
     LogicalKeyboardKey.pageDown: 0x39,  // ROLL DOWN
     LogicalKeyboardKey.capsLock: 0x5D,
-    // 記号 (代表的なものだけ。配列差異がある記号は要望次第で追加)
+    // 記号 (US/JIS 共通)
     LogicalKeyboardKey.minus: 0x0C,
     LogicalKeyboardKey.comma: 0x31,
     LogicalKeyboardKey.period: 0x32,
     LogicalKeyboardKey.slash: 0x33,
     LogicalKeyboardKey.semicolon: 0x27,
+    // JIS 配列固有の記号キー (US 配列だと別の物理位置・別の logical key)。
+    // X68k は JIS なので、JIS キーボードで打ったままの文字 = X68k の同じキー。
+    LogicalKeyboardKey.equal: 0x0D,        // JIS の ^ (US は =)
+    LogicalKeyboardKey.intlYen: 0x0E,      // ¥
+    LogicalKeyboardKey.bracketLeft: 0x1B,  // JIS の @ (US は [)
+    LogicalKeyboardKey.bracketRight: 0x1C, // JIS の [ (US は ])
+    LogicalKeyboardKey.quote: 0x28,        // JIS の : (US は ')
+    LogicalKeyboardKey.backslash: 0x29,    // JIS の ] (US は \)
+    LogicalKeyboardKey.intlRo: 0x34,       // _ (JIS 専用キー)
+    // テンキー (numpad)。OS は NumLock 状態に依らず logical key を出す。
+    LogicalKeyboardKey.numpad0: 0x4F,
+    LogicalKeyboardKey.numpad1: 0x4B,
+    LogicalKeyboardKey.numpad2: 0x4C,
+    LogicalKeyboardKey.numpad3: 0x4D,
+    LogicalKeyboardKey.numpad4: 0x47,
+    LogicalKeyboardKey.numpad5: 0x48,
+    LogicalKeyboardKey.numpad6: 0x49,
+    LogicalKeyboardKey.numpad7: 0x43,
+    LogicalKeyboardKey.numpad8: 0x44,
+    LogicalKeyboardKey.numpad9: 0x45,
+    LogicalKeyboardKey.numpadDecimal: 0x51,
+    LogicalKeyboardKey.numpadComma: 0x50,
+    LogicalKeyboardKey.numpadEnter: 0x4E,
+    LogicalKeyboardKey.numpadAdd: 0x46,
+    LogicalKeyboardKey.numpadSubtract: 0x42,
+    LogicalKeyboardKey.numpadMultiply: 0x41,
+    LogicalKeyboardKey.numpadDivide: 0x40,
+    LogicalKeyboardKey.numpadEqual: 0x4A,
   };
 
   /// HardwareKeyboard コールバック。マップにあるキーだけハンドルし、それ以外は
