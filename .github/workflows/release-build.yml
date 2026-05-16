@@ -84,6 +84,10 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout
+        if: needs.prepare.outputs.is_release == 'true'
+        uses: actions/checkout@v6
+
       - name: Create GitHub Release
         if: needs.prepare.outputs.is_release == 'true'
         env:
