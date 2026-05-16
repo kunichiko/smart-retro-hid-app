@@ -6,8 +6,6 @@
 // ===================================================================================
 
 import 'dart:async';
-import 'dart:io' show Platform;
-import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -41,22 +39,13 @@ class X68kKeyboardPage extends StatefulWidget {
   State<X68kKeyboardPage> createState() => _X68kKeyboardPageState();
 }
 
-class _X68kKeyboardPageState extends State<X68kKeyboardPage>
-    with WidgetsBindingObserver {
+class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
   late final List<ChannelMode> _modes;
-
-  /// macOS/Windows/Linux ではシステム経由の popRoute (Cocoa の Ctrl+M/Ctrl+N
-  /// 等の text editing selector が embedder 経由で popRoute に化けて飛んで
-  /// くるケースがあるため、observer で握りつぶす。モバイル (Android の
-  /// ハードウェアバック等) は通常の挙動を維持。
-  static final bool _isDesktop =
-      !kIsWeb && (Platform.isMacOS || Platform.isWindows || Platform.isLinux);
 
   @override
   void initState() {
     super.initState();
     OrientationHelper.landscape();
-    WidgetsBinding.instance.addObserver(this);
     _modes = [
       StandardX68kMode(
         channel: widget.channel,
@@ -67,8 +56,6 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage>
 
   @override
   void dispose() {
-    debugPrint('[X68kKeyboardPage] state dispose');
-    WidgetsBinding.instance.removeObserver(this);
     for (final m in _modes) {
       m.dispose();
     }
@@ -76,27 +63,17 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage>
   }
 
   @override
-  Future<bool> didPopRoute() async {
-    debugPrint('[X68kKeyboardPage] didPopRoute received (desktop=$_isDesktop)');
-    if (_isDesktop) {
-      // システム経由の popRoute は誤発火と見なしてブロック。
-      // 通常の back ボタン (Navigator.pop 直接呼び出し) はこの経路を通らないので
-      // 影響しない。
-      return true;
-    }
-    return false;
-  }
-
-  @override
   Widget build(BuildContext context) {
-    // === デバッグ用: 連続入力中に page が pop される原因を追うため、pop 発生時に
-    // スタックトレースを出力する。原因特定後に削除予定。
-    return PopScope(
-      canPop: true,
-      onPopInvokedWithResult: (didPop, result) {
-        debugPrint('[X68kKeyboardPage] PopScope onPopInvoked: didPop=$didPop result=$result');
-        debugPrint(StackTrace.current.toString());
-      },
+    // 物理キー入力は HardwareKeyboard.addHandler 経由で MIDI へ転送するので、
+    // Flutter widget tree でのキー処理は不要。デフォルトのショートカットを
+    // 空マップで上書きして無効化することで、以下のような誤動作を防ぐ:
+    //   - Tab / Arrow キーが widget tree のフォーカスを移動させる
+    //     (Cocoa は Ctrl+N を Arrow Down に変換するので連続入力中に発火しがち)
+    //   - Enter が focus 中の widget (例: AppBar 左の戻るボタン) を activate
+    //     (Cocoa は Ctrl+M を Enter に変換するので連続入力中に発火しがち)
+    //   - Esc が DismissIntent で modal を閉じる
+    return Shortcuts(
+      shortcuts: const <ShortcutActivator, Intent>{},
       child: ModeScaffold(
         title: AppLocalizations.of(context)!.x68kKeyboardTitle,
         midi: widget.midi,
@@ -396,7 +373,6 @@ class _X68kKeyboardBodyState extends State<_X68kKeyboardBody> {
 
   @override
   void dispose() {
-    debugPrint('[X68kKeyboardBody] state dispose, _pressed=$_pressed');
     _repeatTimer?.cancel();
     _popupShowTimer?.cancel();
     for (final t in _popupHideTimers.values) {
@@ -589,11 +565,6 @@ class _X68kKeyboardBodyState extends State<_X68kKeyboardBody> {
   /// HardwareKeyboard コールバック。マップにあるキーだけハンドルし、それ以外は
   /// false を返して他のリスナ (OS ショートカット等) に処理を委譲する。
   bool _handlePhysicalKey(KeyEvent event) {
-    // === 一時デバッグ用: 受信した KeyEvent を全件ログ (KeyRepeatEvent はスパムなので除く)
-    if (event is! KeyRepeatEvent) {
-      debugPrint(
-          '[KE] ${event.runtimeType} logical=${event.logicalKey.debugName ?? event.logicalKey} char=${event.character} synth=${event.synthesized}');
-    }
     final scancode = _physicalKeyMap[event.logicalKey];
     if (scancode == null) return false;
 

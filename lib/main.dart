@@ -109,8 +109,6 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _openDevice(MidiDeviceInfo device) async {
-    debugPrint('[HomePage] _openDevice called for ${device.name}');
-    debugPrint(StackTrace.current.toString());
     final success = await _midi.connect(device);
     if (!success || !mounted) return;
 
@@ -173,7 +171,6 @@ class _HomePageState extends State<HomePage> {
   }
 
   void _routeToChannel(MidiDeviceInfo device, ChannelAssignment ch) async {
-    debugPrint('[HomePage] _routeToChannel called: ${ch.hidTypeLabel}/${ch.targetLabel}');
     Widget? page;
     if (ch.hidType == HidType.joystick) {
       page = JoystickPage(midi: _midi, channel: ch.midiChannel);
