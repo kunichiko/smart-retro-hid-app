@@ -31,6 +31,20 @@ jobs:
           channel: 'stable'
           cache: true
 
+      # ネイティブビルド (CMake/MSVC) の中間生成物をキャッシュ。
+      # pubspec.lock とネイティブ設定 (windows/) が一致するなら CMake/MSVC が
+      # インクリメンタルビルドで再利用し、~90s → ~30s 程度まで短縮できる。
+      # restore-keys を使うことで部分一致でも古いキャッシュを土台に使う。
+      - name: Cache Windows native build
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/windows
+            windows/flutter/ephemeral
+          key: windows-build-${{ hashFiles('pubspec.lock', 'windows/CMakeLists.txt', 'windows/runner/**', 'windows/flutter/CMakeLists.txt') }}
+          restore-keys: |
+            windows-build-
+
       - name: Flutter doctor
         run: flutter doctor -v
 
