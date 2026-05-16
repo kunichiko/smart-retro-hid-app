@@ -180,7 +180,7 @@ jobs:
 
   ios:
     name: Build iOS
-    runs-on: macos-15
+    runs-on: macos-26
     needs: prepare
     if: github.event_name == 'push' || github.event.inputs.platform == 'all' || github.event.inputs.platform == 'ios'
     permissions:
