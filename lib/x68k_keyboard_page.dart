@@ -65,15 +65,24 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
   @override
   Widget build(BuildContext context) {
     // 物理キー入力は HardwareKeyboard.addHandler 経由で MIDI へ転送するので、
-    // Flutter widget tree でのキー処理は不要。デフォルトのショートカットを
-    // 空マップで上書きして無効化することで、以下のような誤動作を防ぐ:
-    //   - Tab / Arrow キーが widget tree のフォーカスを移動させる
-    //     (Cocoa は Ctrl+N を Arrow Down に変換するので連続入力中に発火しがち)
-    //   - Enter が focus 中の widget (例: AppBar 左の戻るボタン) を activate
-    //     (Cocoa は Ctrl+M を Enter に変換するので連続入力中に発火しがち)
-    //   - Esc が DismissIntent で modal を閉じる
-    return Shortcuts(
-      shortcuts: const <ShortcutActivator, Intent>{},
+    // Flutter widget tree でのキー処理は不要。以下の Focus でページ全体の
+    // キー処理を完全にブロックする:
+    //   - autofocus: true            → このノードが mount 時に focus を取り、
+    //                                  AppBar の戻るボタン等にフォーカスが
+    //                                  落ちないようにする
+    //   - descendantsAreFocusable: false → 配下の widget は一切 focus 不可。
+    //                                  Tab / Arrow キーで focus を奪われないし、
+    //                                  Enter での activate も発生しない
+    //   - onKeyEvent: handled       → ここに飛んできたキーイベントは全消費
+    //
+    // Cocoa の text editing bindings が Ctrl+N → Arrow Down、Ctrl+M → Enter と
+    // 変換するため、これらが Flutter の DirectionalFocusIntent / ActivateIntent
+    // を発火させて戻るボタンを activate → maybePop してしまう症状の対策。
+    // マウスクリックは focus に依存しないので、AppBar 操作は従来通り可能。
+    return Focus(
+      autofocus: true,
+      descendantsAreFocusable: false,
+      onKeyEvent: (node, event) => KeyEventResult.handled,
       child: ModeScaffold(
         title: AppLocalizations.of(context)!.x68kKeyboardTitle,
         midi: widget.midi,
