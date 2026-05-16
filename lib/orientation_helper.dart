@@ -46,4 +46,18 @@ class OrientationHelper {
       DeviceOrientation.portraitUp,
     ]);
   }
+
+  /// 向きの固定を解除して全方向許可する。OS の自動回転ロックや傾きセンサに任せる。
+  static Future<void> unlock() async {
+    if (!kIsWeb && Platform.isAndroid) {
+      try {
+        await _ch.invokeMethod<void>('setUnspecified');
+        return;
+      } catch (_) {
+        // ネイティブチャンネル未対応の場合は SystemChrome にフォールバック
+      }
+    }
+    // 空 list を渡すと OS デフォルト (全方向) になる。
+    await SystemChrome.setPreferredOrientations(const []);
+  }
 }

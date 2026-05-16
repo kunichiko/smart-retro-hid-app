@@ -58,13 +58,23 @@ class MidiService {
   static const int noteZ = 13;
   static const int noteMode = 14;
 
+  // OS 内蔵で Mimic X になり得ないバーチャル MIDI デバイス。
+  // Windows の "Microsoft GS Wavetable Synth" は出力専用ソフトシンセで
+  // IDENTIFY を返せないため、スキャン段階で除外する。
+  static final List<RegExp> _excludedDeviceNamePatterns = [
+    RegExp(r'Microsoft GS Wavetable', caseSensitive: false),
+  ];
+
   Future<List<MidiDeviceInfo>> scanDevices() async {
     final devices = await _midiCommand.devices ?? [];
-    return devices.map((d) => MidiDeviceInfo(
-      name: d.name,
-      id: d.id,
-      device: d,
-    )).toList();
+    return devices
+        .where((d) => !_excludedDeviceNamePatterns.any((p) => p.hasMatch(d.name)))
+        .map((d) => MidiDeviceInfo(
+              name: d.name,
+              id: d.id,
+              device: d,
+            ))
+        .toList();
   }
 
   Future<bool> connect(MidiDeviceInfo deviceInfo) async {

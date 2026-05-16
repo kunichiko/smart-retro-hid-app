@@ -50,9 +50,10 @@ VS Code / Android Studio から開く場合は Flutter SDK の path を `.fvm/fl
 
 ## リリース手順
 
-タグを起点に Bitrise が自動でビルド・署名し、成果物 (Android APK / macOS ZIP) を
-ローカルにダウンロードしたら、`gh release create` で GitHub Releases に登録する流れ。
-iOS は Bitrise から App Store Connect 経由で TestFlight 配信。
+タグを起点に GitHub Actions が自動でビルド・署名し、成果物を
+GitHub Releases と Actions artifacts に登録する流れ。
+Android APK / AAB、macOS ZIP、Windows ZIP は GitHub Release に添付され、
+iOS IPA / xcarchive は Actions artifacts として取得する。
 
 ### 1. develop → main を merge
 
@@ -71,7 +72,7 @@ git checkout develop                      # reset 不要 (祖先関係維持)
 version: 1.2.3+1   # X.Y.Z 部分が tag と一致する必要あり
 ```
 
-`+N` (build 番号) は CI で `BITRISE_BUILD_NUMBER` に上書きされるので何でもよい
+`+N` (build 番号) は CI で `GITHUB_RUN_NUMBER` に上書きされるので何でもよい
 (慣習で `+1` のまま放置)。
 
 ```sh
@@ -86,27 +87,57 @@ git push
 git tag -a v1.2.3 -m "Release v1.2.3" && git push origin v1.2.3
 ```
 
-Bitrise が tag push を検知 → `scripts/check-tag-version.sh` で pubspec と
+GitHub Actions の `Release Build` workflow が tag push を検知 → pubspec と
 tag の整合性を検証 → flutter build → 署名 → アーティファクト出力。
 **version が不一致だと CI が即 fail する** ので、その場合は pubspec を直して
 tag を打ち直す (`git tag -d v1.2.3 && git push origin :v1.2.3` で削除してから
 再 tag)。
 
-### 4. アーティファクトをダウンロードして GitHub Releases に登録
+### 4. アーティファクトを確認
 
-Bitrise の build 詳細ページから APK / ZIP をダウンロードし、ローカルから
-`gh` CLI で release 化:
+GitHub Actions の `Release Build` が成功すると、tag と同名の GitHub Release に
+Android APK / AAB、macOS ZIP、Windows ZIP が添付される。iOS IPA / xcarchive は
+workflow run の Artifacts からダウンロードする。
+
+必要に応じて `workflow_dispatch` から `all` / `android` / `ios` / `macos` /
+`windows` を選び、手動ビルドも実行できる。
+
+### GitHub Actions Secrets
+
+Android の release 署名には次の Secrets が必要:
+
+- `ANDROID_KEYSTORE_BASE64`
+- `ANDROID_KEYSTORE_PASSWORD`
+- `ANDROID_KEY_ALIAS`
+- `ANDROID_KEY_PASSWORD`
+
+iOS の ad-hoc archive export には次の Secrets が必要:
+
+- `APPLE_TEAM_ID`
+- `IOS_CERTIFICATE_BASE64`
+- `IOS_CERTIFICATE_PASSWORD`
+- `IOS_PROVISIONING_PROFILE_BASE64`
+- `KEYCHAIN_PASSWORD`
+
+TestFlight / App Store Connect へアップロードする場合は、追加で次の Secrets が必要:
+
+- `IOS_APP_STORE_PROVISIONING_PROFILE_BASE64`
+- `APPSTORE_ISSUER_ID`
+- `APPSTORE_KEY_ID`
+- `APPSTORE_PRIVATE_KEY`
+
+macOS の署名証明書を使う場合は次の Secrets を追加する:
+
+- `MACOS_CERTIFICATE_BASE64`
+- `MACOS_CERTIFICATE_PASSWORD`
+
+`.p12` や `.mobileprovision` は base64 化して登録する。
 
 ```sh
-gh release create v1.2.3 \
-  --title "v1.2.3" \
-  --notes "..." \
-  ~/Downloads/mimicx_X.Y.Z/MimicX_android-universal-X.Y.Z-bitrise-signed.apk \
-  ~/Downloads/mimicx_X.Y.Z/MimicX_macos-X.Y.Z.zip
+base64 -i release.keystore | pbcopy
+base64 -i ios_distribution.p12 | pbcopy
+base64 -i profile.mobileprovision | pbcopy
 ```
-
-iOS は Bitrise の "Deploy to App Store Connect" / "Deliver" 系ステップが
-自動で TestFlight にアップロードする (release notes には別途案内を記載)。
 
 ## 関連リポジトリ
 

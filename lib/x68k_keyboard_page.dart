@@ -6,11 +6,23 @@
 // ===================================================================================
 
 import 'dart:async';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'channel_mode.dart';
 import 'l10n/app_localizations.dart';
 import 'midi_service.dart';
+import 'mode_scaffold.dart';
 import 'orientation_helper.dart';
+import 'sjis_encoder.dart';
+import 'x68k_shared_state.dart';
+
+// ===========================================================================
+// X68kKeyboardPage 本体
+// 当面はモードが 1 つ (StandardX68kMode) だけだが、将来フリック入力モード等を
+// 増やす想定で ModeScaffold に乗せている。1 モードならドロップダウンは非表示。
+// ===========================================================================
 
 class X68kKeyboardPage extends StatefulWidget {
   final MidiService midi;
@@ -31,30 +43,277 @@ class X68kKeyboardPage extends StatefulWidget {
 }
 
 class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
-  // 押下中のキー (重複送信防止用)
-  final Set<int> _pressed = {};
+  /// Standard / LineInput 共通の状態 (LED 点灯、輝度、キーリピート設定)。
+  /// onTargetRx ハンドラは page 自身が握って shared に流す。
+  late final X68kKeyboardSharedState _shared;
+  late final List<ChannelMode> _modes;
 
-  // テンキーを表示するか (オフだとメインキーが大きく表示される)
+  @override
+  void initState() {
+    super.initState();
+    // 向きは各モードの onEnter で制御する (Standard は landscape 固定、
+    // LineInput は unlock で任意の向き許可)。
+    _shared = X68kKeyboardSharedState();
+    // TARGET_RX を page で受けて shared に転送する。冪等パターン (既に同じ
+    // closure なら触らない / dispose 時は自分がまだ active な時のみクリア)。
+    widget.midi.onTargetRx = _onTargetRx;
+    _modes = [
+      StandardX68kMode(
+        channel: widget.channel,
+        mouseChannel: widget.mouseChannel,
+        shared: _shared,
+      ),
+      LineInputMode(channel: widget.channel, shared: _shared),
+    ];
+    // 起動直後に LED 状態を本体と同期する。X68000 からは "現在の LED 状態を
+    // 問い合わせる" 直接的な手段が無いので、何か LED トグルキーを押して
+    // X68000 が返す LED 制御コマンド (= 全 7 ビットの現状を含むメッセージ)
+    // で状態を学習する。
+    //
+    // 全 7 キーを次々に押すと、排他関係のあるキー (かな↔ローマ字 / ひらがな等)
+    // で状態遷移がズレる恐れがあるため、INS (他と排他関係を持たない) を
+    // 2 回押して 1 回目で全 LED 状態を読み取り、2 回目で INS を元に戻す。
+    Future.delayed(const Duration(milliseconds: 500), _syncLedState);
+  }
+
+  void _onTargetRx(int midiChannel, int byte) {
+    if (midiChannel != widget.channel) return;
+    _shared.handleTargetRxByte(byte);
+  }
+
+  Future<void> _syncLedState() async {
+    const insScancode = 0x5E;
+    for (int i = 0; i < 2; i++) {
+      if (!mounted) return;
+      widget.midi.sendNoteOn(widget.channel, insScancode, 127);
+      await Future.delayed(const Duration(milliseconds: 30));
+      widget.midi.sendNoteOff(widget.channel, insScancode);
+      // X68000 側で LED 状態を更新 → LED 制御コマンドを返す処理に十分余裕を持たせる
+      await Future.delayed(const Duration(milliseconds: 200));
+    }
+  }
+
+  @override
+  void dispose() {
+    if (widget.midi.onTargetRx == _onTargetRx) {
+      widget.midi.onTargetRx = null;
+    }
+    for (final m in _modes) {
+      m.dispose();
+    }
+    _shared.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ModeScaffold(
+      title: AppLocalizations.of(context)!.x68kKeyboardTitle,
+      midi: widget.midi,
+      modes: _modes,
+      persistenceKey: 'x68k_keyboard.selectedMode',
+    );
+  }
+}
+
+// ===========================================================================
+// X68000 標準キーボードモード
+// テンキー / トラックパッドの表示トグルはこのモードの状態として保持し、
+// AppBar アクションとして提供する。
+// ===========================================================================
+
+class StandardX68kMode extends ChannelMode {
+  final int channel;
+  final int? mouseChannel;
+  final X68kKeyboardSharedState shared;
+
   bool _numpadVisible = true;
-
-  // トラックパッドを表示するか (mouseChannel が来てる時のみ意味を持つ)
   bool _trackpadVisible = true;
 
-  // X68000 LED 制御コマンド (bit7=1) の各ビット → 対応キーのスキャンコード
-  //   bit0: かな, bit1: ローマ字, bit2: コード入力, bit3: CAPS,
-  //   bit4: INS,  bit5: ひらがな, bit6: 全角
-  // X68000 のビット意味は「0=点灯, 1=消灯」
-  static const List<int> _ledBitToScancode = [
-    0x5A, // bit0 かな
-    0x5B, // bit1 ローマ字
-    0x5C, // bit2 コード入力
-    0x5D, // bit3 CAPS
-    0x5E, // bit4 INS
-    0x5F, // bit5 ひらがな
-    0x60, // bit6 全角
-  ];
-  // scancode → 点灯/消灯
-  final Set<int> _ledOn = {};
+  /// デスクトップ環境で複数キー同時押し相当を実現するための sticky 状態。
+  /// 本体 (_X68kKeyboardBody) が読み書きし、AppBar の "全解除" ボタンも
+  /// このコントローラを購読することで表示可否を切り替える。
+  final StickyKeyController stickyController = StickyKeyController();
+
+  StandardX68kMode({
+    required this.channel,
+    this.mouseChannel,
+    required this.shared,
+  });
+
+  @override
+  String get id => 'x68k_keyboard.standard';
+
+  @override
+  String label(BuildContext context) => '標準';
+
+  @override
+  Future<void> onEnter(MidiService midi) async {
+    // キーボードレイアウトは横向き専用。
+    await OrientationHelper.landscape();
+  }
+
+  void _toggleNumpad() {
+    _numpadVisible = !_numpadVisible;
+    notifyListeners();
+  }
+
+  void _toggleTrackpad() {
+    _trackpadVisible = !_trackpadVisible;
+    notifyListeners();
+  }
+
+  @override
+  Widget buildBody(BuildContext context, MidiService midi) {
+    // body の subtree 内では Flutter のフォーカス系キー処理を完全に遮断する。
+    // 物理キー入力は body 内 (_X68kKeyboardBody) が HardwareKeyboard.addHandler
+    // 経由で MIDI に転送するため、widget tree のキー処理は不要。
+    //   - autofocus: true            → mount 時に focus を取り、body 内の
+    //                                  Focusable widget に focus が落ちないように
+    //   - descendantsAreFocusable: false → 配下を一切 focus 不可
+    //   - onKeyEvent: handled       → 来たキーイベントを全消費
+    // AppBar 側の戻るボタンは ModeScaffold 側で ExcludeFocus 済み。
+    return Focus(
+      autofocus: true,
+      descendantsAreFocusable: false,
+      onKeyEvent: (node, event) => KeyEventResult.handled,
+      child: _X68kKeyboardBody(
+        midi: midi,
+        channel: channel,
+        mouseChannel: mouseChannel,
+        numpadVisible: _numpadVisible,
+        trackpadVisible: _trackpadVisible,
+        stickyController: stickyController,
+        shared: shared,
+      ),
+    );
+  }
+
+  @override
+  List<Widget> buildActions(BuildContext context) {
+    return [
+      // Sticky 全解除: stuck キーが 1 つ以上あるときだけ表示。
+      ListenableBuilder(
+        listenable: stickyController,
+        builder: (_, __) {
+          if (!stickyController.hasStuck) return const SizedBox.shrink();
+          return IconButton(
+            tooltip: 'Sticky を全て解除',
+            icon: const Icon(Icons.lock_open),
+            onPressed: stickyController.onReleaseAllRequested,
+          );
+        },
+      ),
+      if (mouseChannel != null)
+        IconButton(
+          tooltip: _trackpadVisible ? 'トラックパッドを非表示' : 'トラックパッドを表示',
+          icon: Icon(
+              _trackpadVisible ? Icons.touch_app : Icons.touch_app_outlined),
+          onPressed: _toggleTrackpad,
+        ),
+      IconButton(
+        tooltip: _numpadVisible ? 'テンキーを非表示' : 'テンキーを表示',
+        icon: Icon(_numpadVisible ? Icons.dialpad : Icons.dialpad_outlined),
+        onPressed: _toggleNumpad,
+      ),
+    ];
+  }
+
+  @override
+  void dispose() {
+    stickyController.dispose();
+    super.dispose();
+  }
+}
+
+// ===========================================================================
+// 複数キー同時押し用 sticky 状態の共有コントローラ
+//
+// マウスクリック (= デスクトップ) では指 1 本ぶんしか押せないため、
+//   - 左クリック (左タップ): Modifier キー (SHIFT/CTRL/OPT/XF) は自動 sticky、
+//                          すでに stuck のキーは 1 クリックで解除
+//   - 右クリック        : 任意キーの sticky を toggle
+// という UX を提供する。タッチ入力 (kind != mouse) では従来通り押下中だけ
+// 反応する。AppBar の "全解除" ボタンと本体側で状態を共有するためにこの
+// ChangeNotifier 経由でやり取りする。
+// ===========================================================================
+
+class StickyKeyController extends ChangeNotifier {
+  final Set<int> _stuck = {};
+
+  Set<int> get stuck => Set.unmodifiable(_stuck);
+  bool get hasStuck => _stuck.isNotEmpty;
+  bool isStuck(int code) => _stuck.contains(code);
+
+  bool add(int code) {
+    final added = _stuck.add(code);
+    if (added) notifyListeners();
+    return added;
+  }
+
+  bool remove(int code) {
+    final removed = _stuck.remove(code);
+    if (removed) notifyListeners();
+    return removed;
+  }
+
+  void clear() {
+    if (_stuck.isEmpty) return;
+    _stuck.clear();
+    notifyListeners();
+  }
+
+  /// body 側が initState で登録する「全 stuck 解除」コールバック。
+  /// AppBar の解除ボタンはこの参照を経由して body の処理を呼ぶ。
+  VoidCallback? onReleaseAllRequested;
+}
+
+/// 左クリック (kind == mouse) で自動 sticky する Modifier 系スキャンコード。
+/// LED 系 (かな/CAPS/INS 等) は X68k 側で push 1 回でトグルする仕様なので、
+/// sticky 化しなくてもデスクトップから操作可能。
+const Set<int> _stickyModifierScancodes = {
+  0x55, // XF1
+  0x56, // XF2
+  0x57, // XF3
+  0x58, // XF4
+  0x59, // XF5
+  0x70, // SHIFT
+  0x71, // CTRL
+  0x72, // OPT.1
+  0x73, // OPT.2
+};
+
+// ===========================================================================
+// キーボード本体 Widget。AppBar 以外のすべての本体ロジック
+// (キー押下/リリース、リピート、ポップアップ、LED 状態、レイアウト等) を担う。
+// ===========================================================================
+
+class _X68kKeyboardBody extends StatefulWidget {
+  final MidiService midi;
+  final int channel;
+  final int? mouseChannel;
+  final bool numpadVisible;
+  final bool trackpadVisible;
+  final StickyKeyController stickyController;
+  final X68kKeyboardSharedState shared;
+
+  const _X68kKeyboardBody({
+    required this.midi,
+    required this.channel,
+    required this.mouseChannel,
+    required this.numpadVisible,
+    required this.trackpadVisible,
+    required this.stickyController,
+    required this.shared,
+  });
+
+  @override
+  State<_X68kKeyboardBody> createState() => _X68kKeyboardBodyState();
+}
+
+class _X68kKeyboardBodyState extends State<_X68kKeyboardBody> {
+  // 押下中のキー (重複送信防止用)
+  final Set<int> _pressed = {};
 
   // ひらがな・全角は緑、それ以外 (かな/ローマ字/コード入力/CAPS/INS) は赤
   static const Set<int> _greenLedScancodes = {0x5F, 0x60};
@@ -100,10 +359,9 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
   };
 
   // キーリピート (X68000 の SET REPEAT START / RATE コマンドで可変)
+  // delay / interval は shared.repeatDelayMs / repeatIntervalMs を参照する。
   Timer? _repeatTimer;
   int? _repeatScancode;
-  int _repeatDelayMs = 500;     // 0b0110dddd: 200 + dddd*100 ms (default dddd=3)
-  int _repeatIntervalMs = 110;  // 0b0111rrrr: 30 + rrrr²*5 ms (default rrrr=4)
 
   // リピートさせないキー (モディファイア / LED トグル系)
   //   0x5A: かな        0x5B: ローマ字    0x5C: コード入力
@@ -123,24 +381,32 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
   // ポップアップは Overlay にエントリを差し込んで AppBar 含む最上層に描画する
   final Map<int, OverlayEntry> _popupOverlays = {};
 
-  // LED 輝度 (0b010101xx: xx=00 最も明るい, xx=11 最も暗い)
+  // LED 輝度に応じた減衰係数 (0b010101xx: xx=00 最も明るい, xx=11 最も暗い)
   // xx=00 → factor 1.0, xx=11 → factor 0.25
-  int _ledBrightness = 0;
   static const List<double> _brightnessFactors = [1.0, 0.7, 0.45, 0.25];
 
   // ポップアップで使う基本ユニットサイズ (LayoutBuilder で更新)
   double _h = 0;
 
-  // 元のハンドラを保持して dispose で復元
-  void Function(int, int)? _prevTargetRxHandler;
-
   @override
   void initState() {
     super.initState();
-    OrientationHelper.landscape();
+    // 横向き固定は外側の X68kKeyboardPage で済ませてある。
+    // onTargetRx は page が握って shared に流すので body 側では関与しない。
 
-    _prevTargetRxHandler = widget.midi.onTargetRx;
-    widget.midi.onTargetRx = _handleTargetRx;
+    // AppBar の "全解除" ボタンから呼ばれるコールバックを登録。
+    widget.stickyController.onReleaseAllRequested = _releaseAllStuck;
+    // sticky 状態 / shared (LED / 輝度) が変わったらキー描画を更新する。
+    widget.stickyController.addListener(_onSharedChanged);
+    widget.shared.addListener(_onSharedChanged);
+
+    // デスクトップ / 外付け物理キーボードからのキーイベントを購読する。
+    // Focus を介さない全域ハンドラなので AppBar 操作中でもキーが拾える。
+    HardwareKeyboard.instance.addHandler(_handlePhysicalKey);
+  }
+
+  void _onSharedChanged() {
+    if (mounted) setState(() {});
   }
 
   @override
@@ -155,49 +421,239 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
       entry.remove();
     }
     _popupOverlays.clear();
-    widget.midi.onTargetRx = _prevTargetRxHandler;
+    // 退場時に sticky で残っている分を全て NoteOff してから controller を切る。
+    _releaseAllStuck();
+    widget.stickyController.removeListener(_onSharedChanged);
+    widget.stickyController.onReleaseAllRequested = null;
+    widget.shared.removeListener(_onSharedChanged);
+    HardwareKeyboard.instance.removeHandler(_handlePhysicalKey);
     super.dispose();
   }
 
-  // ターゲット機 (X68000) から届いた生バイトを解釈する
-  void _handleTargetRx(int midiChannel, int byte) {
-    if (midiChannel != widget.channel) return;
+  // ===========================================================================
+  // Sticky (押しっぱなし) ロジック — デスクトップで複数キー同時押し相当を実現
+  // ===========================================================================
 
-    if ((byte & 0x80) != 0) {
-      // LED 制御コマンド: bit7=1, bit6..0 が各 LED 状態 (0=点灯, 1=消灯)
-      setState(() {
-        for (int i = 0; i < _ledBitToScancode.length; i++) {
-          final lit = ((byte >> i) & 1) == 0;
-          final sc = _ledBitToScancode[i];
-          if (lit) {
-            _ledOn.add(sc);
-          } else {
-            _ledOn.remove(sc);
-          }
-        }
-      });
-      return;
+  /// 指定キーを sticky にする (まだなければ press 状態も併せて作る)。
+  void _stickKey(int code) {
+    if (widget.stickyController.isStuck(code)) return;
+    widget.stickyController.add(code);
+    if (!_pressed.contains(code)) {
+      _pressed.add(code);
+      widget.midi.sendNoteOn(widget.channel, code, 127);
+      HapticFeedback.lightImpact();
     }
-    if ((byte & 0xF0) == 0x60) {
-      // 0b0110dddd: キーリピート開始遅延 (200 + dddd × 100 ms)
-      final n = byte & 0x0F;
-      _repeatDelayMs = 200 + n * 100;
-      return;
+    if (mounted) setState(() {});
+  }
+
+  /// 指定キーの sticky を解除して NoteOff も送る。
+  void _unstickKey(int code) {
+    if (!widget.stickyController.isStuck(code)) return;
+    widget.stickyController.remove(code);
+    if (_pressed.remove(code)) {
+      widget.midi.sendNoteOff(widget.channel, code);
     }
-    if ((byte & 0xF0) == 0x70) {
-      // 0b0111rrrr: キーリピート間隔 (30 + rrrr² × 5 ms)
-      final n = byte & 0x0F;
-      _repeatIntervalMs = 30 + n * n * 5;
-      return;
+    if (mounted) setState(() {});
+  }
+
+  /// AppBar の "全解除" から呼ばれる。
+  void _releaseAllStuck() {
+    final stuck = widget.stickyController.stuck;
+    if (stuck.isEmpty) return;
+    for (final code in stuck) {
+      if (_pressed.remove(code)) {
+        widget.midi.sendNoteOff(widget.channel, code);
+      }
     }
-    if ((byte & 0xFC) == 0x54) {
-      // 0b010101xx: LED 輝度 (xx=00 最も明るい, xx=11 最も暗い)
-      setState(() {
-        _ledBrightness = byte & 0x03;
-      });
-      return;
+    widget.stickyController.clear();
+    if (mounted) setState(() {});
+  }
+
+  /// 左クリック / タップ時の振り分け。
+  ///   - kind == mouse かつ stuck   : 解除のみ (押下は発生させない)
+  ///   - kind == mouse かつ sticky 対象 modifier : 自動 sticky
+  ///   - それ以外 : 通常の momentary press (タッチ動作互換)
+  /// 「sticky 化または解除されたのでこのタップは release を発火させない」場合
+  /// に true を返す。
+  bool _handleKeyDown(int code, TapDownDetails details, BuildContext keyCtx,
+      List<String> labels) {
+    if (details.kind == PointerDeviceKind.mouse) {
+      if (widget.stickyController.isStuck(code)) {
+        _unstickKey(code);
+        return true;
+      }
+      if (_stickyModifierScancodes.contains(code)) {
+        _stickKey(code);
+        return true;
+      }
+    }
+    _press(code, keyCtx, labels);
+    return false;
+  }
+
+  /// 右クリック (二次タップ) は任意キーの sticky を toggle する。
+  void _handleSecondaryTap(int code) {
+    if (widget.stickyController.isStuck(code)) {
+      _unstickKey(code);
+    } else {
+      _stickKey(code);
     }
   }
+
+  // ===========================================================================
+  // 物理キーボード直接入力
+  // ===========================================================================
+  //
+  // LogicalKeyboardKey → X68000 スキャンコード のマッピング。
+  // 基本的に JIS 配列前提でレイアウトしてある (X68000 自体が JIS)。
+  // 記号系の一部は US 配列だと別の物理キー位置になるが、X68k のレイアウトを
+  // 真とする方針なので「ホストで打った文字 = X68k 側のキー」と捉えて欲しい。
+  static final Map<LogicalKeyboardKey, int> _physicalKeyMap = {
+    // 文字キー
+    LogicalKeyboardKey.keyA: 0x1E, LogicalKeyboardKey.keyB: 0x2E,
+    LogicalKeyboardKey.keyC: 0x2C, LogicalKeyboardKey.keyD: 0x20,
+    LogicalKeyboardKey.keyE: 0x13, LogicalKeyboardKey.keyF: 0x21,
+    LogicalKeyboardKey.keyG: 0x22, LogicalKeyboardKey.keyH: 0x23,
+    LogicalKeyboardKey.keyI: 0x18, LogicalKeyboardKey.keyJ: 0x24,
+    LogicalKeyboardKey.keyK: 0x25, LogicalKeyboardKey.keyL: 0x26,
+    LogicalKeyboardKey.keyM: 0x30, LogicalKeyboardKey.keyN: 0x2F,
+    LogicalKeyboardKey.keyO: 0x19, LogicalKeyboardKey.keyP: 0x1A,
+    LogicalKeyboardKey.keyQ: 0x11, LogicalKeyboardKey.keyR: 0x14,
+    LogicalKeyboardKey.keyS: 0x1F, LogicalKeyboardKey.keyT: 0x15,
+    LogicalKeyboardKey.keyU: 0x17, LogicalKeyboardKey.keyV: 0x2D,
+    LogicalKeyboardKey.keyW: 0x12, LogicalKeyboardKey.keyX: 0x2B,
+    LogicalKeyboardKey.keyY: 0x16, LogicalKeyboardKey.keyZ: 0x2A,
+    // 数字キー
+    LogicalKeyboardKey.digit1: 0x02, LogicalKeyboardKey.digit2: 0x03,
+    LogicalKeyboardKey.digit3: 0x04, LogicalKeyboardKey.digit4: 0x05,
+    LogicalKeyboardKey.digit5: 0x06, LogicalKeyboardKey.digit6: 0x07,
+    LogicalKeyboardKey.digit7: 0x08, LogicalKeyboardKey.digit8: 0x09,
+    LogicalKeyboardKey.digit9: 0x0A, LogicalKeyboardKey.digit0: 0x0B,
+    // 制御キー
+    LogicalKeyboardKey.escape: 0x01,
+    LogicalKeyboardKey.backspace: 0x0F,
+    LogicalKeyboardKey.tab: 0x10,
+    LogicalKeyboardKey.enter: 0x1D,
+    LogicalKeyboardKey.space: 0x35,
+    // 矢印
+    LogicalKeyboardKey.arrowUp: 0x3C,
+    LogicalKeyboardKey.arrowDown: 0x3E,
+    LogicalKeyboardKey.arrowLeft: 0x3B,
+    LogicalKeyboardKey.arrowRight: 0x3D,
+    // モディファイア (左右どちらも同じ X68k キーに割り当て)
+    LogicalKeyboardKey.shiftLeft: 0x70,
+    LogicalKeyboardKey.shiftRight: 0x70,
+    LogicalKeyboardKey.controlLeft: 0x71,
+    LogicalKeyboardKey.controlRight: 0x71,
+    LogicalKeyboardKey.altLeft: 0x72,  // OPT.1
+    LogicalKeyboardKey.altRight: 0x73, // OPT.2
+    // ファンクションキー
+    LogicalKeyboardKey.f1: 0x63, LogicalKeyboardKey.f2: 0x64,
+    LogicalKeyboardKey.f3: 0x65, LogicalKeyboardKey.f4: 0x66,
+    LogicalKeyboardKey.f5: 0x67, LogicalKeyboardKey.f6: 0x68,
+    LogicalKeyboardKey.f7: 0x69, LogicalKeyboardKey.f8: 0x6A,
+    LogicalKeyboardKey.f9: 0x6B, LogicalKeyboardKey.f10: 0x6C,
+    // 編集 / ナビゲーション
+    LogicalKeyboardKey.home: 0x36,
+    LogicalKeyboardKey.delete: 0x37,
+    LogicalKeyboardKey.insert: 0x5E,
+    LogicalKeyboardKey.pageUp: 0x38,    // ROLL UP
+    LogicalKeyboardKey.pageDown: 0x39,  // ROLL DOWN
+    LogicalKeyboardKey.capsLock: 0x5D,
+    // 記号 (US/JIS 共通)
+    LogicalKeyboardKey.minus: 0x0C,
+    LogicalKeyboardKey.comma: 0x31,
+    LogicalKeyboardKey.period: 0x32,
+    LogicalKeyboardKey.slash: 0x33,
+    LogicalKeyboardKey.semicolon: 0x27,
+    // 記号系の追加マッピング。LogicalKeyboardKey は USASCII 文字基準の命名なので、
+    // 「produced character = JIS のキー」と読めば素直に対応する。
+    // JIS 配列で専用キーがあるもの (caret / at / colon / yen / ro) と、US/JIS で
+    // 同一文字を出すブラケット記号、US 配列固有の backslash まで網羅する。
+    LogicalKeyboardKey.caret: 0x0D,         // ^
+    LogicalKeyboardKey.intlYen: 0x0E,       // ¥
+    LogicalKeyboardKey.at: 0x1B,            // @ (JIS 専用キー)
+    LogicalKeyboardKey.bracketLeft: 0x1C,   // [
+    LogicalKeyboardKey.colon: 0x28,         // : (JIS 専用キー)
+    LogicalKeyboardKey.bracketRight: 0x29,  // ]
+    LogicalKeyboardKey.intlRo: 0x34,        // _ (JIS 専用キーの素押し)
+    LogicalKeyboardKey.underscore: 0x34,    // _ (OS 側で shift 解決される場合)
+    LogicalKeyboardKey.backslash: 0x0E,     // \ (US 専用キー → JIS ¥ と等価)
+    // テンキー (numpad)。OS は NumLock 状態に依らず logical key を出す。
+    LogicalKeyboardKey.numpad0: 0x4F,
+    LogicalKeyboardKey.numpad1: 0x4B,
+    LogicalKeyboardKey.numpad2: 0x4C,
+    LogicalKeyboardKey.numpad3: 0x4D,
+    LogicalKeyboardKey.numpad4: 0x47,
+    LogicalKeyboardKey.numpad5: 0x48,
+    LogicalKeyboardKey.numpad6: 0x49,
+    LogicalKeyboardKey.numpad7: 0x43,
+    LogicalKeyboardKey.numpad8: 0x44,
+    LogicalKeyboardKey.numpad9: 0x45,
+    LogicalKeyboardKey.numpadDecimal: 0x51,
+    LogicalKeyboardKey.numpadComma: 0x50,
+    LogicalKeyboardKey.numpadEnter: 0x4E,
+    LogicalKeyboardKey.numpadAdd: 0x46,
+    LogicalKeyboardKey.numpadSubtract: 0x42,
+    LogicalKeyboardKey.numpadMultiply: 0x41,
+    LogicalKeyboardKey.numpadDivide: 0x40,
+    LogicalKeyboardKey.numpadEqual: 0x4A,
+  };
+
+  /// HardwareKeyboard コールバック。マップにあるキーだけハンドルし、それ以外は
+  /// false を返して他のリスナ (OS ショートカット等) に処理を委譲する。
+  bool _handlePhysicalKey(KeyEvent event) {
+    final scancode = _physicalKeyMap[event.logicalKey];
+    if (scancode == null) return false;
+
+    if (event is KeyDownEvent) {
+      _physicalKeyDown(scancode);
+      return true;
+    }
+    if (event is KeyUpEvent) {
+      _physicalKeyUp(scancode);
+      return true;
+    }
+    // OS のオートリピートはファームが repeat 管理するため NoteOn 重発は不要。
+    // ただし return false にすると macOS が「未処理キー」と見なして NSBeep を
+    // 鳴らすので、イベント自体は consume (return true) して握りつぶす。
+    if (event is KeyRepeatEvent) {
+      return true;
+    }
+    return false;
+  }
+
+  void _physicalKeyDown(int code) {
+    // 既に押されている (sticky 等) なら二重 NoteOn を避ける
+    if (_pressed.contains(code)) return;
+    _pressed.add(code);
+    widget.midi.sendNoteOn(widget.channel, code, 127);
+    // リピートは画面タップと同じくアプリ側 Timer で実装する (ファームの
+    // SET REPEAT で配られた delay/interval をアプリが受け取り、ここで再送する)。
+    // OS の KeyRepeatEvent は _handlePhysicalKey 側で消費しているので、
+    // この Timer 由来の NoteOn だけが流れる。
+    if (!_noRepeatScancodes.contains(code)) {
+      _scheduleRepeat(code);
+    }
+    if (mounted) setState(() {});
+  }
+
+  void _physicalKeyUp(int code) {
+    // sticky 中は物理キーの release で解除しない (画面上の sticky を尊重)
+    if (widget.stickyController.isStuck(code)) return;
+    if (_pressed.remove(code)) {
+      if (_repeatScancode == code) {
+        _repeatTimer?.cancel();
+        _repeatScancode = null;
+      }
+      widget.midi.sendNoteOff(widget.channel, code);
+      if (mounted) setState(() {});
+    }
+  }
+
+  // ターゲット機からの生バイト処理は X68kKeyboardPage が一括して shared に
+  // 流す方式に変更したため、body 内の _handleTargetRx は撤廃。
+  // LED 状態 / 輝度 / リピート設定は widget.shared から参照する。
 
   void _press(int code, BuildContext keyCtx, List<String> labels) {
     if (_pressed.add(code)) {
@@ -225,6 +681,10 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
   }
 
   void _release(int code) {
+    // sticky 中のキーは指を離しても release しない (押しっぱなしを維持)。
+    if (widget.stickyController.isStuck(code)) {
+      return;
+    }
     if (_pressed.remove(code)) {
       if (_repeatScancode == code) {
         _repeatTimer?.cancel();
@@ -308,20 +768,21 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
     );
   }
 
-  // 押下から _repeatDelayMs 経過したらリピート開始
+  // 押下から shared.repeatDelayMs 経過したらリピート開始
   void _scheduleRepeat(int code) {
     _repeatTimer?.cancel();
     _repeatScancode = code;
-    _repeatTimer = Timer(Duration(milliseconds: _repeatDelayMs), () {
+    _repeatTimer =
+        Timer(Duration(milliseconds: widget.shared.repeatDelayMs), () {
       if (!_pressed.contains(code)) return;
       _startRepeating(code);
     });
   }
 
-  // _repeatIntervalMs 間隔で Note On を撃ち続ける (firmware 側は make コードを再送)
+  // shared.repeatIntervalMs 間隔で Note On を撃ち続ける (firmware 側は make コードを再送)
   void _startRepeating(int code) {
     _repeatTimer = Timer.periodic(
-      Duration(milliseconds: _repeatIntervalMs),
+      Duration(milliseconds: widget.shared.repeatIntervalMs),
       (_) {
         if (!_pressed.contains(code)) {
           _repeatTimer?.cancel();
@@ -338,29 +799,13 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
   @override
   Widget build(BuildContext context) {
     final hasMouse = widget.mouseChannel != null;
-    return Scaffold(
-      backgroundColor: const Color(0xFF1a1a1a),
-      appBar: AppBar(
-        title: Text(AppLocalizations.of(context)!.x68kKeyboardTitle),
-        backgroundColor: const Color(0xFF000000),
-        actions: [
-          if (hasMouse)
-            IconButton(
-              tooltip: _trackpadVisible ? 'トラックパッドを非表示' : 'トラックパッドを表示',
-              icon: Icon(_trackpadVisible ? Icons.touch_app : Icons.touch_app_outlined),
-              onPressed: () => setState(() => _trackpadVisible = !_trackpadVisible),
-            ),
-          IconButton(
-            tooltip: _numpadVisible ? 'テンキーを非表示' : 'テンキーを表示',
-            icon: Icon(_numpadVisible ? Icons.dialpad : Icons.dialpad_outlined),
-            onPressed: () => setState(() => _numpadVisible = !_numpadVisible),
-          ),
-        ],
-      ),
-      body: SafeArea(
+    // 背景色は ModeScaffold ではなく body 側で持つ (キーボードページの黒地)。
+    return Container(
+      color: const Color(0xFF1a1a1a),
+      child: SafeArea(
         child: LayoutBuilder(
           builder: (context, constraints) {
-            final showTrackpad = hasMouse && _trackpadVisible;
+            final showTrackpad = hasMouse && widget.trackpadVisible;
             if (!showTrackpad) {
               return _buildKeyboard(constraints);
             }
@@ -399,7 +844,7 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
   static const double _numpadAreaW = 4.0;
   static const double _gap = 0.3;
 
-  double get _totalW => _numpadVisible
+  double get _totalW => widget.numpadVisible
       ? _mainAreaW + _gap + _cursorAreaW + _gap + _numpadAreaW
       : _mainAreaW + _gap + _cursorAreaW;
 
@@ -501,7 +946,7 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
             ),
           ),
           // テンキー ENTER (縦 2 段) — テンキー表示時のみ
-          if (_numpadVisible)
+          if (widget.numpadVisible)
             Positioned(
               left: xNumpadEnter,
               top: yRow4,
@@ -550,7 +995,7 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
   }
 
   // 行を「main + gap + cursor + gap + numpad」形式で組み立てる
-  // _numpadVisible=false のときは numpad 部分を完全に省略する
+  // widget.numpadVisible=false のときは numpad 部分を完全に省略する
   Widget _row3({
     required double u,
     required double h,
@@ -568,7 +1013,7 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
         SizedBox(width: u * _gap),
         ...cursor,
         SizedBox(width: u * (_cursorAreaW - cursorSumU)),
-        if (_numpadVisible) ...[
+        if (widget.numpadVisible) ...[
           SizedBox(width: u * _gap),
           ...numpad,
           SizedBox(width: u * (_numpadAreaW - numpadSumU)),
@@ -737,16 +1182,17 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
 
   Widget _keyMulti(List<String> labels, int scancode, double width, double height) {
     final pressed = _pressed.contains(scancode);
-    final ledOn = _ledOn.contains(scancode);
-    final hasLed = _ledBitToScancode.contains(scancode);
+    final stuck = widget.stickyController.isStuck(scancode);
+    final ledOn = widget.shared.isLedOn(scancode);
+    final hasLed = X68kKeyboardSharedState.ledBitToScancode.contains(scancode);
 
     // 表示ラベル切替:
     //   かな ON + ひらがな ON  → ひらがな
     //   かな ON + ひらがな OFF → カタカナ
     //   かな OFF + SHIFT       → JIS 記号 (1-0 段、,./)
     //   それ以外               → 通常の英数記号
-    final kanaActive = _ledOn.contains(0x5A);
-    final hiraganaActive = _ledOn.contains(0x5F);
+    final kanaActive = widget.shared.isLedOn(0x5A);
+    final hiraganaActive = widget.shared.isLedOn(0x5F);
     final shiftPressed = _pressed.contains(0x70);
     String? overrideLabel;
     if (kanaActive) {
@@ -773,18 +1219,27 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
         child: Padding(
           padding: const EdgeInsets.all(1.5),
           child: GestureDetector(
-            onTapDown: (_) => _press(scancode, keyCtx, displayLabels),
+            onTapDown: (d) => _handleKeyDown(scancode, d, keyCtx, displayLabels),
             onTapUp: (_) => _release(scancode),
             onTapCancel: () => _release(scancode),
+            // 右クリック / 二次タップ: 任意キーを sticky toggle
+            onSecondaryTap: () => _handleSecondaryTap(scancode),
             child: Stack(
               children: [
                 Container(
                   decoration: BoxDecoration(
-                    color: pressed ? const Color(0xFF505050) : const Color(0xFF222222),
+                    // sticky 中はオレンジで塗り、押下中 (sticky 含む) は明色背景にする。
+                    color: pressed
+                        ? const Color(0xFF505050)
+                        : const Color(0xFF222222),
                     borderRadius: BorderRadius.circular(4),
                     border: Border.all(
-                      color: pressed ? Colors.white : const Color(0xFF555555),
-                      width: pressed ? 2 : 1,
+                      color: stuck
+                          ? const Color(0xFFFFB300) // amber (sticky)
+                          : pressed
+                              ? Colors.white
+                              : const Color(0xFF555555),
+                      width: (stuck || pressed) ? 2 : 1,
                     ),
                   ),
                   child: Center(
@@ -816,7 +1271,7 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
                         height: 6,
                         decoration: BoxDecoration(
                           color: ledOn
-                              ? _applyBrightness(ledColor, _ledBrightness)
+                              ? _applyBrightness(ledColor, widget.shared.ledBrightness)
                               : ledColorDim,
                           borderRadius: const BorderRadius.only(
                             topLeft: Radius.circular(1),
@@ -825,7 +1280,7 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
                           boxShadow: ledOn
                               ? [
                                   BoxShadow(
-                                    color: _applyBrightness(ledGlow, _ledBrightness),
+                                    color: _applyBrightness(ledGlow, widget.shared.ledBrightness),
                                     blurRadius: 5,
                                     spreadRadius: 0.5,
                                   ),
@@ -1075,6 +1530,603 @@ class _TrackpadSurfaceState extends State<_TrackpadSurface> {
               letterSpacing: 4,
             ),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+// ===========================================================================
+// LineInputMode — 1 行のテキストフィールドにまとめて入力し、Enter / 送信
+// ボタンで文字列を X68000 にタイプする入力モード。
+//
+// 文字 → スキャンコード変換は JIS 配列基準。大文字 (A-Z) や JIS の Shift 記号
+// (! " # 等) は SHIFT 修飾を自動付与する。
+// 送信前に LED トグル系 (かな/CAPS/ローマ字/コード入力/ひらがな/全角/INS) を
+// 観測中の状態に基づいてオフに戻し、押下中の可能性がある修飾キーを強制 release
+// する。これでクリーンな状態から打ち始める。
+// 漢字等の未対応文字は現バージョンではスキップ (送信完了時に件数を表示)。
+// ===========================================================================
+
+class LineInputMode extends ChannelMode {
+  final int channel;
+  final X68kKeyboardSharedState shared;
+  final TextEditingController _controller = TextEditingController();
+  // 送信履歴。モードを切り替えても消えないように body 側でなく mode 側に持つ。
+  // SharedPreferences で永続化 (アプリ再起動でも残る)。
+  final List<String> _history = [];
+  static const int _maxHistory = 100;
+  static const String _prefsKey = 'lineInput.history';
+
+  LineInputMode({required this.channel, required this.shared}) {
+    // 起動時に SharedPreferences から履歴を非同期で読み込む。
+    // 読み込み完了後に notifyListeners() を呼んで body の再描画を促す。
+    _loadHistory();
+  }
+
+  /// 履歴の不変ビュー (body 側からの読み取り用)。
+  List<String> get history => List<String>.unmodifiable(_history);
+
+  Future<void> _loadHistory() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final saved = prefs.getStringList(_prefsKey);
+      if (saved != null && saved.isNotEmpty) {
+        _history
+          ..clear()
+          ..addAll(saved.take(_maxHistory));
+        notifyListeners();
+      }
+    } catch (_) {
+      // 読み込み失敗時は空のままで続行
+    }
+  }
+
+  Future<void> _saveHistory() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setStringList(_prefsKey, _history);
+    } catch (_) {
+      // 保存失敗は無視 (致命的でない)
+    }
+  }
+
+  /// 履歴に追加する。重複は先頭に移動し、上限を超えた末尾を切り捨てる。
+  void addToHistory(String text) {
+    if (text.isEmpty) return;
+    _history.remove(text);
+    _history.insert(0, text);
+    if (_history.length > _maxHistory) {
+      _history.removeRange(_maxHistory, _history.length);
+    }
+    notifyListeners();
+    _saveHistory();
+  }
+
+  /// 履歴から 1 件削除する。
+  void removeFromHistory(String text) {
+    if (_history.remove(text)) {
+      notifyListeners();
+      _saveHistory();
+    }
+  }
+
+  @override
+  String get id => 'x68k_keyboard.lineInput';
+
+  @override
+  String label(BuildContext context) => 'ライン入力';
+
+  @override
+  Future<void> onEnter(MidiService midi) async {
+    // ライン入力は portrait / landscape どちらでも使えるよう向きの固定を解除。
+    await OrientationHelper.unlock();
+  }
+
+  @override
+  Widget buildBody(BuildContext context, MidiService midi) {
+    return _LineInputBody(
+      midi: midi,
+      channel: channel,
+      controller: _controller,
+      shared: shared,
+      mode: this,
+    );
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+}
+
+class _LineInputBody extends StatefulWidget {
+  final MidiService midi;
+  final int channel;
+  final TextEditingController controller;
+  final X68kKeyboardSharedState shared;
+  final LineInputMode mode;
+
+  const _LineInputBody({
+    required this.midi,
+    required this.channel,
+    required this.controller,
+    required this.shared,
+    required this.mode,
+  });
+
+  @override
+  State<_LineInputBody> createState() => _LineInputBodyState();
+}
+
+class _LineInputBodyState extends State<_LineInputBody> {
+  final FocusNode _focusNode = FocusNode();
+  bool _sending = false;
+  String _status = '';
+
+  @override
+  void initState() {
+    super.initState();
+    // mode の notifyListeners (履歴 load / add / remove) で再描画する。
+    widget.mode.addListener(_onModeChanged);
+  }
+
+  void _onModeChanged() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    widget.mode.removeListener(_onModeChanged);
+    _focusNode.dispose();
+    super.dispose();
+  }
+
+  // 機能キー (BS / DEL / TAB / ESC / INS / HOME / CLR / カーソル) の定義。
+  // 各ボタンは押下で 1 回だけ NoteOn/Off ペアを送る。
+  static const List<({String label, int scancode})> _functionKeys = [
+    (label: 'ESC', scancode: 0x01),
+    (label: 'TAB', scancode: 0x10),
+    (label: 'BS', scancode: 0x0F),
+    (label: 'DEL', scancode: 0x37),
+    (label: 'INS', scancode: 0x5E),
+    (label: 'HOME', scancode: 0x36),
+    (label: 'CLR', scancode: 0x3F),
+    (label: '←', scancode: 0x3B),
+    (label: '↓', scancode: 0x3E),
+    (label: '↑', scancode: 0x3C),
+    (label: '→', scancode: 0x3D),
+  ];
+
+  // a-z (logical) を X68k スキャンコード A-Z の順で並べたもの。
+  static const List<int> _letterScancodes = [
+    0x1E, 0x2E, 0x2C, 0x20, 0x13, 0x21, 0x22, 0x23, // A B C D E F G H
+    0x18, 0x24, 0x25, 0x26, 0x30, 0x2F, 0x19, 0x1A, // I J K L M N O P
+    0x11, 0x14, 0x1F, 0x15, 0x17, 0x2D, 0x12, 0x2B, // Q R S T U V W X
+    0x16, 0x2A, //                                    Y Z
+  ];
+  // 0-9 → 各スキャンコード
+  static const List<int> _digitScancodes = [
+    0x0B, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A,
+  ];
+  // それ以外の記号類。値は (scancode, 要 SHIFT) の record。
+  static const Map<String, (int, bool)> _symbolMap = {
+    // SHIFT 不要 (JIS 素押し)
+    ' ': (0x35, false),
+    '-': (0x0C, false),
+    '^': (0x0D, false),
+    '¥': (0x0E, false),
+    '\\': (0x0E, false), // US の \ も JIS の ¥ に割り当て
+    '@': (0x1B, false),
+    '[': (0x1C, false),
+    ';': (0x27, false),
+    ':': (0x28, false),
+    ']': (0x29, false),
+    ',': (0x31, false),
+    '.': (0x32, false),
+    '/': (0x33, false),
+    // SHIFT + その他キーで出る JIS 記号
+    '!': (0x02, true),
+    '"': (0x03, true),
+    '#': (0x04, true),
+    '\$': (0x05, true),
+    '%': (0x06, true),
+    '&': (0x07, true),
+    "'": (0x08, true),
+    '(': (0x09, true),
+    ')': (0x0A, true),
+    '=': (0x0C, true),
+    '~': (0x0D, true),
+    '|': (0x0E, true),
+    '`': (0x1B, true),
+    '{': (0x1C, true),
+    '+': (0x27, true),
+    '*': (0x28, true),
+    '}': (0x29, true),
+    '<': (0x31, true),
+    '>': (0x32, true),
+    '?': (0x33, true),
+    '_': (0x34, true),
+    // 制御文字
+    '\n': (0x1D, false), // 改行 → RETURN
+    '\t': (0x10, false), // タブ
+  };
+
+  /// 1 文字 → (scancode, SHIFT 要否)。マップ外なら null。
+  static (int, bool)? _charToScancode(String char) {
+    if (char.length != 1) return null;
+    final code = char.codeUnitAt(0);
+    // a-z
+    if (code >= 0x61 && code <= 0x7A) {
+      return (_letterScancodes[code - 0x61], false);
+    }
+    // A-Z
+    if (code >= 0x41 && code <= 0x5A) {
+      return (_letterScancodes[code - 0x41], true);
+    }
+    // 0-9
+    if (code >= 0x30 && code <= 0x39) {
+      return (_digitScancodes[code - 0x30], false);
+    }
+    return _symbolMap[char];
+  }
+
+  // X68k スキャンコード定数
+  static const int _scShift = 0x70;
+  static const int _scCodeInput = 0x5C;
+  // 送信前に強制 release する修飾キー (SHIFT/CTRL/OPT.1/OPT.2/XF1-5)
+  static const List<int> _modifiersToRelease = [
+    0x70, 0x71, 0x72, 0x73, 0x55, 0x56, 0x57, 0x58, 0x59,
+  ];
+  // 観測した LED のうち点灯中ならトグル押下でオフに戻す対象スキャンコード
+  static const List<int> _toggleKeysToClear = [
+    0x5A, 0x5B, 0x5C, 0x5D, 0x5E, 0x5F, 0x60,
+  ];
+
+  // タイミング
+  static const Duration _intraKeyDelay = Duration(milliseconds: 15);
+  static const Duration _interKeyDelay = Duration(milliseconds: 25);
+
+  Future<void> _send() async {
+    if (_sending) return;
+    final text = widget.controller.text;
+    if (text.isEmpty) {
+      // 空行 + Enter は X68000 に RETURN (改行) を 1 回送る。
+      // 履歴には追加しない (空文字を履歴に残しても意味がないため)。
+      setState(() {
+        _sending = true;
+        _status = '改行送信中...';
+      });
+      debugPrint('[LineInput] === send empty (RETURN only) ===');
+      try {
+        await _resetState();
+        await _sendOneChar(0x1D, false); // X68k RETURN
+        if (mounted) setState(() => _status = '改行を送信');
+      } catch (e) {
+        if (mounted) setState(() => _status = 'エラー: $e');
+      } finally {
+        if (mounted) setState(() => _sending = false);
+        _restoreFocusAfterFrame();
+      }
+      return;
+    }
+    final runes = text.runes.toList();
+    setState(() {
+      _sending = true;
+      _status = '送信中... 0/${runes.length}';
+    });
+    int sent = 0;
+    int skipped = 0;
+    // コード入力モードの状態を追跡 (toggle なので前回の状態を覚えておく)。
+    // _resetState が toggle 系をすべてオフにするので false スタートで OK。
+    bool inCodeMode = false;
+
+    Future<void> ensureCodeMode(bool desired) async {
+      if (inCodeMode == desired) return;
+      debugPrint(
+          '[LineInput] toggle code-input mode ${desired ? 'ON' : 'OFF'}');
+      await _sendOneChar(_scCodeInput, false);
+      inCodeMode = desired;
+      await Future.delayed(_interKeyDelay);
+    }
+
+    debugPrint('[LineInput] === send start: "$text" (${runes.length} codepoints) ===');
+    try {
+      await _resetState();
+      for (int i = 0; i < runes.length; i++) {
+        final cp = runes[i];
+        final raw = String.fromCharCode(cp);
+        final asciiMapping = _charToScancode(raw);
+        if (asciiMapping != null) {
+          // ASCII 系: コード入力モードを抜けてから直接送る
+          await ensureCodeMode(false);
+          debugPrint('[LineInput]   send[$i] "$raw"'
+              ' → scancode=0x${asciiMapping.$1.toRadixString(16).padLeft(2, '0')}'
+              ' shift=${asciiMapping.$2}');
+          await _sendOneChar(asciiMapping.$1, asciiMapping.$2);
+          sent++;
+        } else {
+          // SJIS にエンコードしてコード入力モードで送る
+          final sjis = SjisEncoder.encode(cp);
+          if (sjis != null) {
+            await ensureCodeMode(true);
+            debugPrint('[LineInput]   send[$i] "$raw"'
+                ' U+${cp.toRadixString(16).padLeft(4, '0').toUpperCase()}'
+                ' → SJIS=0x${sjis.toRadixString(16).padLeft(4, '0').toUpperCase()}');
+            await _sendSjisHex(sjis);
+            sent++;
+          } else {
+            debugPrint('[LineInput]   skip[$i] "$raw"'
+                ' U+${cp.toRadixString(16).padLeft(4, '0').toUpperCase()}'
+                ' (SJIS にマップなし)');
+            skipped++;
+          }
+        }
+        if ((i & 0x07) == 0 && mounted) {
+          setState(() {
+            _status = '送信中... ${i + 1}/${runes.length}';
+          });
+        }
+        await Future.delayed(_interKeyDelay);
+      }
+      // 最後にコード入力モードを抜けておく
+      await ensureCodeMode(false);
+      debugPrint('[LineInput] === send done: sent=$sent skipped=$skipped ===');
+      if (mounted) {
+        // 履歴に追加 (重複は先頭に移動 + 永続化) し、入力欄をクリア。
+        widget.mode.addToHistory(text);
+        widget.controller.clear();
+        setState(() {
+          _status = '完了 (送信 $sent 文字, スキップ $skipped 文字)';
+        });
+      }
+    } catch (e) {
+      debugPrint('[LineInput] !! error during send: $e');
+      if (mounted) {
+        setState(() => _status = 'エラー: $e');
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _sending = false);
+      }
+      _restoreFocusAfterFrame();
+    }
+  }
+
+  /// TextField.onSubmitted は内部で focus を外す挙動があるため、次フレーム以降に
+  /// 改めて requestFocus する。同期的に呼ぶと、TextField 側の unfocus に上書き
+  /// されてしまう。
+  void _restoreFocusAfterFrame() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _focusNode.requestFocus();
+    });
+  }
+
+  /// SJIS のコードを 4 桁 hex (16-bit 値 MSB から) として X68000 のキー入力で送る。
+  /// コード入力モードに入っている前提。
+  Future<void> _sendSjisHex(int sjisCode) async {
+    for (int shift = 12; shift >= 0; shift -= 4) {
+      final hex = (sjisCode >> shift) & 0x0F;
+      final scancode = _hexDigitToScancode(hex);
+      debugPrint('[LineInput]     hex ${hex.toRadixString(16).toUpperCase()}'
+          ' → scancode=0x${scancode.toRadixString(16)}');
+      await _sendOneChar(scancode, false);
+      await Future.delayed(_intraKeyDelay);
+    }
+  }
+
+  /// 0..F の hex 数字に対応する X68k スキャンコードを返す
+  /// (0-9 は数字行、A-F は A-F キー、いずれも SHIFT 不要)。
+  static int _hexDigitToScancode(int hex) {
+    if (hex < 10) return _digitScancodes[hex];
+    return _letterScancodes[hex - 10]; // A..F → letterScancodes[0..5]
+  }
+
+  /// 送信前に X68000 のキーボード状態をクリーンに戻す。
+  Future<void> _resetState() async {
+    debugPrint('[LineInput] reset: release modifiers');
+    // 押下中の可能性がある修飾キーを強制 release (no-op の場合も含めて安全)。
+    for (final code in _modifiersToRelease) {
+      widget.midi.sendNoteOff(widget.channel, code);
+    }
+    await Future.delayed(_intraKeyDelay);
+
+    // 観測中の LED が点灯している toggle key を押してオフに戻す。
+    final leds = widget.shared.ledOn;
+    debugPrint('[LineInput] reset: ledOn snapshot = '
+        '${leds.map((c) => '0x${c.toRadixString(16)}').join(',')}');
+    for (final code in _toggleKeysToClear) {
+      if (leds.contains(code)) {
+        debugPrint('[LineInput] reset: toggle off 0x${code.toRadixString(16)}');
+        widget.midi.sendNoteOn(widget.channel, code, 127);
+        await Future.delayed(_intraKeyDelay);
+        widget.midi.sendNoteOff(widget.channel, code);
+        await Future.delayed(_interKeyDelay);
+      }
+    }
+  }
+
+  Future<void> _sendOneChar(int scancode, bool needShift) async {
+    final ch = widget.channel;
+    if (needShift) {
+      widget.midi.sendNoteOn(ch, _scShift, 127);
+      await Future.delayed(_intraKeyDelay);
+    }
+    widget.midi.sendNoteOn(ch, scancode, 127);
+    await Future.delayed(_intraKeyDelay);
+    widget.midi.sendNoteOff(ch, scancode);
+    if (needShift) {
+      await Future.delayed(_intraKeyDelay);
+      widget.midi.sendNoteOff(ch, _scShift);
+    }
+  }
+
+  void _clear() {
+    widget.controller.clear();
+    setState(() => _status = '');
+    _focusNode.requestFocus();
+  }
+
+  /// 履歴の 1 件を入力欄にロード (送信はしない)。
+  void _loadFromHistory(String text) {
+    widget.controller.text = text;
+    widget.controller.selection =
+        TextSelection.collapsed(offset: text.length);
+    _focusNode.requestFocus();
+  }
+
+  /// 履歴の 1 件を削除する (永続化も連動)。
+  void _removeFromHistory(String text) {
+    widget.mode.removeFromHistory(text);
+    _focusNode.requestFocus();
+  }
+
+  /// 機能キー (BS / DEL / TAB / ESC / INS / カーソル等) を 1 回押下する。
+  /// 履歴やテキストフィールドには影響せず、X68000 へ即座に送る。
+  Future<void> _pressFunctionKey(int scancode) async {
+    debugPrint('[LineInput] function key: scancode=0x'
+        '${scancode.toRadixString(16).padLeft(2, '0')}');
+    widget.midi.sendNoteOn(widget.channel, scancode, 127);
+    await Future.delayed(_intraKeyDelay);
+    widget.midi.sendNoteOff(widget.channel, scancode);
+    _focusNode.requestFocus();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final hintColor = colors.onSurface.withValues(alpha: 0.35);
+    // 全体を SingleChildScrollView で包み、ソフトウェアキーボード表示時や狭い
+    // landscape phone でも領域不足にならないようにする。履歴も list ではなく
+    // 通常 Column で全件描画して、outer scroll に任せる。
+    return SafeArea(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // 入力行
+            TextField(
+              controller: widget.controller,
+              focusNode: _focusNode,
+              autofocus: true,
+              enabled: !_sending,
+              decoration: InputDecoration(
+                hintText: 'X68000 に送る文字列 (Enter で送信、空 Enter で改行)',
+                hintStyle: TextStyle(color: hintColor),
+                border: const OutlineInputBorder(),
+                isDense: true,
+              ),
+              onSubmitted: (_) => _send(),
+            ),
+            const SizedBox(height: 8),
+            // 送信 / クリア + ステータス
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                FilledButton.icon(
+                  onPressed: _sending ? null : _send,
+                  icon: const Icon(Icons.send, size: 18),
+                  label: const Text('送信'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: _sending ? null : _clear,
+                  icon: const Icon(Icons.clear, size: 18),
+                  label: const Text('クリア'),
+                ),
+                if (_status.isNotEmpty)
+                  Text(
+                    _status,
+                    style: const TextStyle(color: Colors.grey, fontSize: 12),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            // 機能キー (BS / DEL / TAB / ESC / INS / HOME / CLR / カーソル)
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: [
+                for (final fk in _functionKeys)
+                  OutlinedButton(
+                    style: OutlinedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 10),
+                      minimumSize: const Size(40, 32),
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                    onPressed: _sending
+                        ? null
+                        : () => _pressFunctionKey(fk.scancode),
+                    child: Text(fk.label,
+                        style: const TextStyle(fontSize: 12)),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            // 履歴一覧 (タップでロード、送信はしない)
+            Container(
+              decoration: BoxDecoration(
+                border: Border.all(color: colors.outlineVariant),
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: widget.mode.history.isEmpty
+                  ? Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 20),
+                      child: Center(
+                        child: Text(
+                          '送信履歴はここに表示されます (タップで入力欄にロード)',
+                          style: TextStyle(color: hintColor, fontSize: 12),
+                          textAlign: TextAlign.center,
+                        ),
+                      ),
+                    )
+                  : Column(
+                      children: [
+                        for (final item in widget.mode.history)
+                          InkWell(
+                            onTap: () => _loadFromHistory(item),
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 12, vertical: 4),
+                              child: Row(
+                                children: [
+                                  Icon(Icons.history,
+                                      size: 14, color: hintColor),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Text(
+                                      item,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(fontSize: 13),
+                                    ),
+                                  ),
+                                  // ×: 行高を変えないようコンパクトなボタンに
+                                  IconButton(
+                                    icon: Icon(Icons.close,
+                                        size: 14, color: hintColor),
+                                    padding: EdgeInsets.zero,
+                                    constraints: const BoxConstraints(
+                                      minWidth: 22,
+                                      minHeight: 22,
+                                    ),
+                                    splashRadius: 12,
+                                    visualDensity: VisualDensity.compact,
+                                    tooltip: '履歴から削除',
+                                    onPressed: () =>
+                                        _removeFromHistory(item),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+            ),
+          ],
         ),
       ),
     );

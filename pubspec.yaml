@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.0.3+1
+version: 1.0.7+1
 
 environment:
   sdk: ^3.8.1
@@ -36,6 +36,10 @@ dependencies:
   cupertino_icons: ^1.0.8
   flutter_midi_command: ^0.5.4
   shared_preferences: ^2.3.0
+  # 漢字をライン入力モードで送るために Shift-JIS のテーブルを利用する。
+  # (charset の組み込み Encoder は実装にバグがあって Unicode→SJIS が壊れている
+  #  ため、内部の SJIS→UTF8 テーブルを逆引きして自前で reverse map を構築する)
+  charset: ^2.0.1
   flutter_localizations:
     sdk: flutter
   intl: any
@@ -64,6 +68,10 @@ flutter_launcher_icons:
   macos:
     generate: true
     image_path: "assets/icon.png"
+  windows:
+    generate: true
+    image_path: "assets/icon.png"
+    icon_size: 256
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec

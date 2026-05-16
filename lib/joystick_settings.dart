@@ -3,17 +3,29 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 /// ジョイスティック画面の操作設定。
 ///
-/// アプリ起動時に [JoystickSettings.instance.load] を一度だけ await して初期化
-/// する。値の変更は set* メソッドで行い、SharedPreferences に永続化される。
-/// ChangeNotifier を継承しているので画面側は addListener で再描画フックできる。
+/// モードごとに 1 インスタンス持つ前提で、コンストラクタの [prefix] を
+/// SharedPreferences キーの接頭辞にする (例: "joystick.atari")。
+/// load() が呼ばれた時点で永続化値があれば読み込み、無ければ
+/// v1.0.5 までの非プレフィックスキー (`js_*`) をフォールバックとして使う。
+///
+/// ChangeNotifier を継承しているので、画面側は addListener で再描画フックできる。
 class JoystickSettings extends ChangeNotifier {
-  static final JoystickSettings instance = JoystickSettings._();
-  JoystickSettings._();
+  final String prefix;
 
-  static const String _kDeadZoneRatio = 'js_dead_zone_ratio';
-  static const String _kExtraHitRadius = 'js_extra_hit_radius';
-  static const String _kTurboNotes = 'js_turbo_notes';
-  static const String _kTurboRate = 'js_turbo_rate';
+  JoystickSettings({required this.prefix});
+
+  // 新キー (prefixed)
+  String get _kDeadZoneRatio => '$prefix.deadZoneRatio';
+  String get _kExtraHitRadius => '$prefix.extraHitRadius';
+  String get _kTurboNotes => '$prefix.turboNotes';
+  String get _kTurboRate => '$prefix.turboRate';
+
+  // v1.0.5 までの旧キー (どのモードでもなく単一インスタンスだった時代)。
+  // 既存ユーザの設定を引き継ぐため、新キーが無い場合のフォールバックに使う。
+  static const String _legacyDeadZoneRatio = 'js_dead_zone_ratio';
+  static const String _legacyExtraHitRadius = 'js_extra_hit_radius';
+  static const String _legacyTurboNotes = 'js_turbo_notes';
+  static const String _legacyTurboRate = 'js_turbo_rate';
 
   /// 不感エリア半径のデフォルト (D-pad サイズに対する比率, 0.0〜0.4)
   static const double defaultDeadZoneRatio = 0.15;
@@ -25,11 +37,13 @@ class JoystickSettings extends ChangeNotifier {
   /// 連射速度のデフォルト (Hz, 1.0〜30.0)。1 Hz = 1 秒間に 1 回 press。
   static const double defaultTurboRate = 10.0;
 
+  bool _loaded = false;
   double _deadZoneRatio = defaultDeadZoneRatio;
   double _extraHitRadius = defaultExtraHitRadius;
   Set<int> _turboNotes = const <int>{};
   double _turboRate = defaultTurboRate;
 
+  bool get loaded => _loaded;
   double get deadZoneRatio => _deadZoneRatio;
   double get extraHitRadius => _extraHitRadius;
 
@@ -41,12 +55,25 @@ class JoystickSettings extends ChangeNotifier {
   double get turboRate => _turboRate;
 
   Future<void> load() async {
+    if (_loaded) return;
     final prefs = await SharedPreferences.getInstance();
-    _deadZoneRatio = prefs.getDouble(_kDeadZoneRatio) ?? defaultDeadZoneRatio;
-    _extraHitRadius = prefs.getDouble(_kExtraHitRadius) ?? defaultExtraHitRadius;
-    final list = prefs.getStringList(_kTurboNotes) ?? const <String>[];
-    _turboNotes = list.map(int.parse).toSet();
-    _turboRate = prefs.getDouble(_kTurboRate) ?? defaultTurboRate;
+
+    _deadZoneRatio = prefs.getDouble(_kDeadZoneRatio) ??
+        prefs.getDouble(_legacyDeadZoneRatio) ??
+        defaultDeadZoneRatio;
+    _extraHitRadius = prefs.getDouble(_kExtraHitRadius) ??
+        prefs.getDouble(_legacyExtraHitRadius) ??
+        defaultExtraHitRadius;
+    _turboRate = prefs.getDouble(_kTurboRate) ??
+        prefs.getDouble(_legacyTurboRate) ??
+        defaultTurboRate;
+
+    final notes = prefs.getStringList(_kTurboNotes) ??
+        prefs.getStringList(_legacyTurboNotes) ??
+        const <String>[];
+    _turboNotes = notes.map(int.parse).toSet();
+
+    _loaded = true;
     notifyListeners();
   }
 
