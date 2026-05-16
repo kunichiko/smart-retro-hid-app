@@ -77,10 +77,35 @@ jobs:
           echo "build_number=${GITHUB_RUN_NUMBER}" >> "${GITHUB_OUTPUT}"
           echo "flutter_version=${FLUTTER_VERSION}" >> "${GITHUB_OUTPUT}"
 
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: prepare
+    permissions:
+      contents: write
+    steps:
+      - name: Create GitHub Release
+        if: needs.prepare.outputs.is_release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release create "${GITHUB_REF_NAME}" \
+              --title "${GITHUB_REF_NAME}" \
+              --generate-notes \
+              --verify-tag
+          fi
+
+      - name: Skip release creation
+        if: needs.prepare.outputs.is_release != 'true'
+        run: echo "Release creation is skipped for non-tag builds."
+
   android:
     name: Build Android
     runs-on: ubuntu-latest
-    needs: prepare
+    needs: [prepare, release]
     if: github.event_name == 'push' || github.event.inputs.platform == 'all' || github.event.inputs.platform == 'android'
     permissions:
       contents: write
@@ -157,7 +182,7 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           AAB="dist/MimicX_android-${{ needs.prepare.outputs.app_version }}.aab"
-          APK="dist/MimicX_android-universal-${{ needs.prepare.outputs.app_version }}.apk"
+          APK="dist/MimicX_android-${{ needs.prepare.outputs.app_version }}.apk"
           cp build/app/outputs/bundle/release/app-release.aab "${AAB}"
           cp build/app/outputs/flutter-apk/app-release.apk "${APK}"
           echo "aab=${AAB}" >> "${GITHUB_OUTPUT}"
@@ -172,11 +197,9 @@ jobs:
 
       - name: Upload Android artifacts to GitHub Release
         if: needs.prepare.outputs.is_release == 'true'
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*
-          generate_release_notes: true
-          fail_on_unmatched_files: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${GITHUB_REF_NAME}" "${{ steps.package.outputs.apk }}" --clobber
 
   ios:
     name: Build iOS
@@ -192,8 +215,8 @@ jobs:
       IOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
       IOS_APP_STORE_PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_APP_STORE_PROVISIONING_PROFILE_BASE64 }}
       KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-      IOS_DISTRIBUTION_METHOD: ${{ github.event.inputs.ios_distribution || 'ad-hoc' }}
-      UPLOAD_TESTFLIGHT: ${{ github.event.inputs.upload_testflight || 'false' }}
+      IOS_DISTRIBUTION_METHOD: ${{ github.event_name == 'push' && 'app-store-connect' || github.event.inputs.ios_distribution || 'ad-hoc' }}
+      UPLOAD_TESTFLIGHT: ${{ github.event_name == 'push' && 'true' || github.event.inputs.upload_testflight || 'false' }}
       APPSTORE_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
       APPSTORE_KEY_ID: ${{ secrets.APPSTORE_KEY_ID }}
       APPSTORE_PRIVATE_KEY: ${{ secrets.APPSTORE_PRIVATE_KEY }}
@@ -380,7 +403,7 @@ jobs:
   macos:
     name: Build macOS
     runs-on: macos-15
-    needs: prepare
+    needs: [prepare, release]
     if: github.event_name == 'push' || github.event.inputs.platform == 'all' || github.event.inputs.platform == 'macos'
     permissions:
       contents: write
@@ -388,6 +411,9 @@ jobs:
       MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
       MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
       KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+      APPSTORE_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
+      APPSTORE_KEY_ID: ${{ secrets.APPSTORE_KEY_ID }}
+      APPSTORE_PRIVATE_KEY: ${{ secrets.APPSTORE_PRIVATE_KEY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -406,14 +432,16 @@ jobs:
         run: flutter analyze --no-fatal-infos
 
       - name: Install macOS signing certificate
-        if: env.MACOS_CERTIFICATE_BASE64 != ''
         shell: bash
         run: |
           set -euo pipefail
-          if [ -z "${MACOS_CERTIFICATE_PASSWORD:-}" ] || [ -z "${KEYCHAIN_PASSWORD:-}" ]; then
-            echo "::error::MACOS_CERTIFICATE_PASSWORD and KEYCHAIN_PASSWORD are required when MACOS_CERTIFICATE_BASE64 is set"
-            exit 1
-          fi
+
+          for name in MACOS_CERTIFICATE_BASE64 MACOS_CERTIFICATE_PASSWORD KEYCHAIN_PASSWORD; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::GitHub Secret ${name} is required for macOS Developer ID signing and notarization"
+              exit 1
+            fi
+          done
 
           CERTIFICATE_PATH="${RUNNER_TEMP}/macos-signing.p12"
           KEYCHAIN_PATH="${RUNNER_TEMP}/macos-signing.keychain-db"
@@ -426,11 +454,74 @@ jobs:
           security list-keychain -d user -s "${KEYCHAIN_PATH}" login.keychain-db
           security set-key-partition-list -S apple-tool:,apple: -s -k "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
 
+          SIGN_IDENTITY=$(security find-identity -v -p codesigning "${KEYCHAIN_PATH}" | sed -n 's/.*"\(Developer ID Application:.*\)".*/\1/p' | head -n 1)
+          if [ -z "${SIGN_IDENTITY}" ]; then
+            echo "::error::MACOS_CERTIFICATE_BASE64 must contain a Developer ID Application certificate"
+            exit 1
+          fi
+
+          echo "MACOS_KEYCHAIN_PATH=${KEYCHAIN_PATH}" >> "${GITHUB_ENV}"
+          echo "MACOS_SIGN_IDENTITY=${SIGN_IDENTITY}" >> "${GITHUB_ENV}"
+
       - name: Build macOS release
         run: >
           flutter build macos --release
           --build-name=${{ needs.prepare.outputs.app_version }}
           --build-number=${{ needs.prepare.outputs.build_number }}
+
+      - name: Sign and notarize macOS app
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for name in APPSTORE_ISSUER_ID APPSTORE_KEY_ID APPSTORE_PRIVATE_KEY; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::GitHub Secret ${name} is required for macOS notarization"
+              exit 1
+            fi
+          done
+
+          APP_PATH="build/macos/Build/Products/Release/Mimic X.app"
+          NOTARY_ZIP="${RUNNER_TEMP}/MimicX_macos-notary.zip"
+          KEY_DIR="${HOME}/.appstoreconnect/private_keys"
+          KEY_PATH="${KEY_DIR}/AuthKey_${APPSTORE_KEY_ID}.p8"
+
+          mkdir -p "${KEY_DIR}"
+          if [[ "${APPSTORE_PRIVATE_KEY}" == *"BEGIN PRIVATE KEY"* ]]; then
+            printf '%s' "${APPSTORE_PRIVATE_KEY}" | perl -pe 's/\\n/\n/g; s/\r$//' > "${KEY_PATH}"
+          else
+            printf '%s' "${APPSTORE_PRIVATE_KEY}" | base64 --decode > "${KEY_PATH}"
+          fi
+          if ! grep -q "BEGIN PRIVATE KEY" "${KEY_PATH}"; then
+            echo "::error::APPSTORE_PRIVATE_KEY must be the contents of the App Store Connect API key .p8 file, or its base64-encoded value"
+            exit 1
+          fi
+          chmod 600 "${KEY_PATH}"
+
+          if [ -d "${APP_PATH}/Contents/Frameworks" ]; then
+            while IFS= read -r library; do
+              codesign --force --timestamp --options runtime --sign "${MACOS_SIGN_IDENTITY}" "${library}"
+            done < <(find "${APP_PATH}/Contents/Frameworks" -type f \( -name '*.dylib' -o -name '*.so' \))
+
+            while IFS= read -r framework; do
+              codesign --force --timestamp --options runtime --sign "${MACOS_SIGN_IDENTITY}" "${framework}"
+            done < <(find "${APP_PATH}/Contents/Frameworks" -type d -name '*.framework' | sort -r)
+          fi
+
+          codesign --force --timestamp --options runtime \
+            --entitlements macos/Runner/Release.entitlements \
+            --sign "${MACOS_SIGN_IDENTITY}" \
+            "${APP_PATH}"
+          codesign --verify --deep --strict --verbose=2 "${APP_PATH}"
+
+          ditto -c -k --sequesterRsrc --keepParent "${APP_PATH}" "${NOTARY_ZIP}"
+          xcrun notarytool submit "${NOTARY_ZIP}" \
+            --key "${KEY_PATH}" \
+            --key-id "${APPSTORE_KEY_ID}" \
+            --issuer "${APPSTORE_ISSUER_ID}" \
+            --wait
+          xcrun stapler staple "${APP_PATH}"
+          xcrun stapler validate "${APP_PATH}"
 
       - name: Package macOS zip
         id: package
@@ -455,16 +546,14 @@ jobs:
 
       - name: Upload macOS zip to GitHub Release
         if: needs.prepare.outputs.is_release == 'true'
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*
-          generate_release_notes: true
-          fail_on_unmatched_files: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
 
   windows:
     name: Build Windows
     runs-on: windows-latest
-    needs: prepare
+    needs: [prepare, release]
     if: github.event_name == 'pull_request' || github.event_name == 'push' || github.event.inputs.platform == 'all' || github.event.inputs.platform == 'windows'
     permissions:
       contents: write
@@ -506,7 +595,7 @@ jobs:
         shell: pwsh
         run: |
           $version = "${{ needs.prepare.outputs.app_version }}"
-          $zipName = "mimicx-windows-v$version.zip"
+          $zipName = "MimicX_windows-$version.zip"
           Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath $zipName -Force
           "zip_name=$zipName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
@@ -519,8 +608,7 @@ jobs:
 
       - name: Upload Windows zip to GitHub Release
         if: needs.prepare.outputs.is_release == 'true'
-        uses: softprops/action-gh-release@v2
-        with:
-          files: ${{ steps.package.outputs.zip_name }}
-          generate_release_notes: true
-          fail_on_unmatched_files: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: gh release upload "$env:GITHUB_REF_NAME" "${{ steps.package.outputs.zip_name }}" --clobber
