@@ -27,6 +27,11 @@ class MainActivity : FlutterActivity() {
                         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
                         result.success(null)
                     }
+                    "setUnspecified" -> {
+                        // 全方向許可。OS の傾きセンサ / 自動回転ロックに任せる。
+                        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                        result.success(null)
+                    }
                     else -> result.notImplemented()
                 }
             }

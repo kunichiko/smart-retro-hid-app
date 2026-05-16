@@ -50,7 +50,8 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
   @override
   void initState() {
     super.initState();
-    OrientationHelper.landscape();
+    // 向きは各モードの onEnter で制御する (Standard は landscape 固定、
+    // LineInput は unlock で任意の向き許可)。
     _shared = X68kKeyboardSharedState();
     // TARGET_RX を page で受けて shared に転送する。冪等パターン (既に同じ
     // closure なら触らない / dispose 時は自分がまだ active な時のみクリア)。
@@ -144,6 +145,12 @@ class StandardX68kMode extends ChannelMode {
 
   @override
   String label(BuildContext context) => '標準';
+
+  @override
+  Future<void> onEnter(MidiService midi) async {
+    // キーボードレイアウトは横向き専用。
+    await OrientationHelper.landscape();
+  }
 
   void _toggleNumpad() {
     _numpadVisible = !_numpadVisible;
@@ -1557,6 +1564,12 @@ class LineInputMode extends ChannelMode {
   String label(BuildContext context) => 'ライン入力';
 
   @override
+  Future<void> onEnter(MidiService midi) async {
+    // ライン入力は portrait / landscape どちらでも使えるよう向きの固定を解除。
+    await OrientationHelper.unlock();
+  }
+
+  @override
   Widget buildBody(BuildContext context, MidiService midi) {
     return _LineInputBody(
       midi: midi,
@@ -1919,8 +1932,11 @@ class _LineInputBodyState extends State<_LineInputBody> {
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
     final hintColor = colors.onSurface.withValues(alpha: 0.35);
+    // 全体を SingleChildScrollView で包み、ソフトウェアキーボード表示時や狭い
+    // landscape phone でも領域不足にならないようにする。履歴も list ではなく
+    // 通常 Column で全件描画して、outer scroll に任せる。
     return SafeArea(
-      child: Padding(
+      child: SingleChildScrollView(
         padding: const EdgeInsets.all(12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1941,26 +1957,26 @@ class _LineInputBodyState extends State<_LineInputBody> {
             ),
             const SizedBox(height: 8),
             // 送信 / クリア + ステータス
-            Row(
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              crossAxisAlignment: WrapCrossAlignment.center,
               children: [
                 FilledButton.icon(
                   onPressed: _sending ? null : _send,
                   icon: const Icon(Icons.send, size: 18),
                   label: const Text('送信'),
                 ),
-                const SizedBox(width: 8),
                 OutlinedButton.icon(
                   onPressed: _sending ? null : _clear,
                   icon: const Icon(Icons.clear, size: 18),
                   label: const Text('クリア'),
                 ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Text(
+                if (_status.isNotEmpty)
+                  Text(
                     _status,
                     style: const TextStyle(color: Colors.grey, fontSize: 12),
                   ),
-                ),
               ],
             ),
             const SizedBox(height: 8),
@@ -1986,24 +2002,27 @@ class _LineInputBodyState extends State<_LineInputBody> {
             ),
             const SizedBox(height: 12),
             // 履歴一覧 (タップでロード、送信はしない)
-            Expanded(
-              child: Container(
-                decoration: BoxDecoration(
-                  border: Border.all(color: colors.outlineVariant),
-                  borderRadius: BorderRadius.circular(4),
-                ),
-                child: widget.history.isEmpty
-                    ? Center(
+            Container(
+              decoration: BoxDecoration(
+                border: Border.all(color: colors.outlineVariant),
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: widget.history.isEmpty
+                  ? Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 20),
+                      child: Center(
                         child: Text(
                           '送信履歴はここに表示されます (タップで入力欄にロード)',
                           style: TextStyle(color: hintColor, fontSize: 12),
+                          textAlign: TextAlign.center,
                         ),
-                      )
-                    : ListView.builder(
-                        itemCount: widget.history.length,
-                        itemBuilder: (ctx, i) {
-                          final item = widget.history[i];
-                          return InkWell(
+                      ),
+                    )
+                  : Column(
+                      children: [
+                        for (final item in widget.history)
+                          InkWell(
                             onTap: () => _loadFromHistory(item),
                             child: Padding(
                               padding: const EdgeInsets.symmetric(
@@ -2023,10 +2042,9 @@ class _LineInputBodyState extends State<_LineInputBody> {
                                 ],
                               ),
                             ),
-                          );
-                        },
-                      ),
-              ),
+                          ),
+                      ],
+                    ),
             ),
           ],
         ),
