@@ -554,8 +554,6 @@ class _X68kKeyboardBodyState extends State<_X68kKeyboardBody> {
   /// HardwareKeyboard コールバック。マップにあるキーだけハンドルし、それ以外は
   /// false を返して他のリスナ (OS ショートカット等) に処理を委譲する。
   bool _handlePhysicalKey(KeyEvent event) {
-    // OS のオートリピートは無視 (ファーム側がリピートを管理しているので)
-    if (event is KeyRepeatEvent) return false;
     final scancode = _physicalKeyMap[event.logicalKey];
     if (scancode == null) return false;
 
@@ -565,6 +563,12 @@ class _X68kKeyboardBodyState extends State<_X68kKeyboardBody> {
     }
     if (event is KeyUpEvent) {
       _physicalKeyUp(scancode);
+      return true;
+    }
+    // OS のオートリピートはファームが repeat 管理するため NoteOn 重発は不要。
+    // ただし return false にすると macOS が「未処理キー」と見なして NSBeep を
+    // 鳴らすので、イベント自体は consume (return true) して握りつぶす。
+    if (event is KeyRepeatEvent) {
       return true;
     }
     return false;
