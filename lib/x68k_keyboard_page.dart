@@ -6,6 +6,7 @@
 // ===================================================================================
 
 import 'dart:async';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'channel_mode.dart';
@@ -84,6 +85,11 @@ class StandardX68kMode extends ChannelMode {
   bool _numpadVisible = true;
   bool _trackpadVisible = true;
 
+  /// デスクトップ環境で複数キー同時押し相当を実現するための sticky 状態。
+  /// 本体 (_X68kKeyboardBody) が読み書きし、AppBar の "全解除" ボタンも
+  /// このコントローラを購読することで表示可否を切り替える。
+  final StickyKeyController stickyController = StickyKeyController();
+
   StandardX68kMode({required this.channel, this.mouseChannel});
 
   @override
@@ -111,12 +117,25 @@ class StandardX68kMode extends ChannelMode {
       mouseChannel: mouseChannel,
       numpadVisible: _numpadVisible,
       trackpadVisible: _trackpadVisible,
+      stickyController: stickyController,
     );
   }
 
   @override
   List<Widget> buildActions(BuildContext context) {
     return [
+      // Sticky 全解除: stuck キーが 1 つ以上あるときだけ表示。
+      ListenableBuilder(
+        listenable: stickyController,
+        builder: (_, __) {
+          if (!stickyController.hasStuck) return const SizedBox.shrink();
+          return IconButton(
+            tooltip: 'Sticky を全て解除',
+            icon: const Icon(Icons.lock_open),
+            onPressed: stickyController.onReleaseAllRequested,
+          );
+        },
+      ),
       if (mouseChannel != null)
         IconButton(
           tooltip: _trackpadVisible ? 'トラックパッドを非表示' : 'トラックパッドを表示',
@@ -131,7 +150,70 @@ class StandardX68kMode extends ChannelMode {
       ),
     ];
   }
+
+  @override
+  void dispose() {
+    stickyController.dispose();
+    super.dispose();
+  }
 }
+
+// ===========================================================================
+// 複数キー同時押し用 sticky 状態の共有コントローラ
+//
+// マウスクリック (= デスクトップ) では指 1 本ぶんしか押せないため、
+//   - 左クリック (左タップ): Modifier キー (SHIFT/CTRL/OPT/XF) は自動 sticky、
+//                          すでに stuck のキーは 1 クリックで解除
+//   - 右クリック        : 任意キーの sticky を toggle
+// という UX を提供する。タッチ入力 (kind != mouse) では従来通り押下中だけ
+// 反応する。AppBar の "全解除" ボタンと本体側で状態を共有するためにこの
+// ChangeNotifier 経由でやり取りする。
+// ===========================================================================
+
+class StickyKeyController extends ChangeNotifier {
+  final Set<int> _stuck = {};
+
+  Set<int> get stuck => Set.unmodifiable(_stuck);
+  bool get hasStuck => _stuck.isNotEmpty;
+  bool isStuck(int code) => _stuck.contains(code);
+
+  bool add(int code) {
+    final added = _stuck.add(code);
+    if (added) notifyListeners();
+    return added;
+  }
+
+  bool remove(int code) {
+    final removed = _stuck.remove(code);
+    if (removed) notifyListeners();
+    return removed;
+  }
+
+  void clear() {
+    if (_stuck.isEmpty) return;
+    _stuck.clear();
+    notifyListeners();
+  }
+
+  /// body 側が initState で登録する「全 stuck 解除」コールバック。
+  /// AppBar の解除ボタンはこの参照を経由して body の処理を呼ぶ。
+  VoidCallback? onReleaseAllRequested;
+}
+
+/// 左クリック (kind == mouse) で自動 sticky する Modifier 系スキャンコード。
+/// LED 系 (かな/CAPS/INS 等) は X68k 側で push 1 回でトグルする仕様なので、
+/// sticky 化しなくてもデスクトップから操作可能。
+const Set<int> _stickyModifierScancodes = {
+  0x55, // XF1
+  0x56, // XF2
+  0x57, // XF3
+  0x58, // XF4
+  0x59, // XF5
+  0x70, // SHIFT
+  0x71, // CTRL
+  0x72, // OPT.1
+  0x73, // OPT.2
+};
 
 // ===========================================================================
 // キーボード本体 Widget。AppBar 以外のすべての本体ロジック
@@ -144,6 +226,7 @@ class _X68kKeyboardBody extends StatefulWidget {
   final int? mouseChannel;
   final bool numpadVisible;
   final bool trackpadVisible;
+  final StickyKeyController stickyController;
 
   const _X68kKeyboardBody({
     required this.midi,
@@ -151,6 +234,7 @@ class _X68kKeyboardBody extends StatefulWidget {
     required this.mouseChannel,
     required this.numpadVisible,
     required this.trackpadVisible,
+    required this.stickyController,
   });
 
   @override
@@ -261,6 +345,15 @@ class _X68kKeyboardBodyState extends State<_X68kKeyboardBody> {
     // 横向き固定は外側の X68kKeyboardPage で済ませてある。
     _prevTargetRxHandler = widget.midi.onTargetRx;
     widget.midi.onTargetRx = _handleTargetRx;
+
+    // AppBar の "全解除" ボタンから呼ばれるコールバックを登録。
+    widget.stickyController.onReleaseAllRequested = _releaseAllStuck;
+    // sticky 状態が変わったらキー描画を更新する。
+    widget.stickyController.addListener(_onStickyChanged);
+  }
+
+  void _onStickyChanged() {
+    if (mounted) setState(() {});
   }
 
   @override
@@ -276,7 +369,81 @@ class _X68kKeyboardBodyState extends State<_X68kKeyboardBody> {
     }
     _popupOverlays.clear();
     widget.midi.onTargetRx = _prevTargetRxHandler;
+    // 退場時に sticky で残っている分を全て NoteOff してから controller を切る。
+    _releaseAllStuck();
+    widget.stickyController.removeListener(_onStickyChanged);
+    widget.stickyController.onReleaseAllRequested = null;
     super.dispose();
+  }
+
+  // ===========================================================================
+  // Sticky (押しっぱなし) ロジック — デスクトップで複数キー同時押し相当を実現
+  // ===========================================================================
+
+  /// 指定キーを sticky にする (まだなければ press 状態も併せて作る)。
+  void _stickKey(int code) {
+    if (widget.stickyController.isStuck(code)) return;
+    widget.stickyController.add(code);
+    if (!_pressed.contains(code)) {
+      _pressed.add(code);
+      widget.midi.sendNoteOn(widget.channel, code, 127);
+      HapticFeedback.lightImpact();
+    }
+    if (mounted) setState(() {});
+  }
+
+  /// 指定キーの sticky を解除して NoteOff も送る。
+  void _unstickKey(int code) {
+    if (!widget.stickyController.isStuck(code)) return;
+    widget.stickyController.remove(code);
+    if (_pressed.remove(code)) {
+      widget.midi.sendNoteOff(widget.channel, code);
+    }
+    if (mounted) setState(() {});
+  }
+
+  /// AppBar の "全解除" から呼ばれる。
+  void _releaseAllStuck() {
+    final stuck = widget.stickyController.stuck;
+    if (stuck.isEmpty) return;
+    for (final code in stuck) {
+      if (_pressed.remove(code)) {
+        widget.midi.sendNoteOff(widget.channel, code);
+      }
+    }
+    widget.stickyController.clear();
+    if (mounted) setState(() {});
+  }
+
+  /// 左クリック / タップ時の振り分け。
+  ///   - kind == mouse かつ stuck   : 解除のみ (押下は発生させない)
+  ///   - kind == mouse かつ sticky 対象 modifier : 自動 sticky
+  ///   - それ以外 : 通常の momentary press (タッチ動作互換)
+  /// 「sticky 化または解除されたのでこのタップは release を発火させない」場合
+  /// に true を返す。
+  bool _handleKeyDown(int code, TapDownDetails details, BuildContext keyCtx,
+      List<String> labels) {
+    if (details.kind == PointerDeviceKind.mouse) {
+      if (widget.stickyController.isStuck(code)) {
+        _unstickKey(code);
+        return true;
+      }
+      if (_stickyModifierScancodes.contains(code)) {
+        _stickKey(code);
+        return true;
+      }
+    }
+    _press(code, keyCtx, labels);
+    return false;
+  }
+
+  /// 右クリック (二次タップ) は任意キーの sticky を toggle する。
+  void _handleSecondaryTap(int code) {
+    if (widget.stickyController.isStuck(code)) {
+      _unstickKey(code);
+    } else {
+      _stickKey(code);
+    }
   }
 
   // ターゲット機 (X68000) から届いた生バイトを解釈する
@@ -345,6 +512,10 @@ class _X68kKeyboardBodyState extends State<_X68kKeyboardBody> {
   }
 
   void _release(int code) {
+    // sticky 中のキーは指を離しても release しない (押しっぱなしを維持)。
+    if (widget.stickyController.isStuck(code)) {
+      return;
+    }
     if (_pressed.remove(code)) {
       if (_repeatScancode == code) {
         _repeatTimer?.cancel();
@@ -841,6 +1012,7 @@ class _X68kKeyboardBodyState extends State<_X68kKeyboardBody> {
 
   Widget _keyMulti(List<String> labels, int scancode, double width, double height) {
     final pressed = _pressed.contains(scancode);
+    final stuck = widget.stickyController.isStuck(scancode);
     final ledOn = _ledOn.contains(scancode);
     final hasLed = _ledBitToScancode.contains(scancode);
 
@@ -877,18 +1049,27 @@ class _X68kKeyboardBodyState extends State<_X68kKeyboardBody> {
         child: Padding(
           padding: const EdgeInsets.all(1.5),
           child: GestureDetector(
-            onTapDown: (_) => _press(scancode, keyCtx, displayLabels),
+            onTapDown: (d) => _handleKeyDown(scancode, d, keyCtx, displayLabels),
             onTapUp: (_) => _release(scancode),
             onTapCancel: () => _release(scancode),
+            // 右クリック / 二次タップ: 任意キーを sticky toggle
+            onSecondaryTap: () => _handleSecondaryTap(scancode),
             child: Stack(
               children: [
                 Container(
                   decoration: BoxDecoration(
-                    color: pressed ? const Color(0xFF505050) : const Color(0xFF222222),
+                    // sticky 中はオレンジで塗り、押下中 (sticky 含む) は明色背景にする。
+                    color: pressed
+                        ? const Color(0xFF505050)
+                        : const Color(0xFF222222),
                     borderRadius: BorderRadius.circular(4),
                     border: Border.all(
-                      color: pressed ? Colors.white : const Color(0xFF555555),
-                      width: pressed ? 2 : 1,
+                      color: stuck
+                          ? const Color(0xFFFFB300) // amber (sticky)
+                          : pressed
+                              ? Colors.white
+                              : const Color(0xFF555555),
+                      width: (stuck || pressed) ? 2 : 1,
                     ),
                   ),
                   child: Center(
