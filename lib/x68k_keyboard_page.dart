@@ -579,10 +579,13 @@ class _X68kKeyboardBodyState extends State<_X68kKeyboardBody> {
     if (_pressed.contains(code)) return;
     _pressed.add(code);
     widget.midi.sendNoteOn(widget.channel, code, 127);
-    // 物理キーボードはホスト OS が自前でオートリピート (KeyRepeatEvent) を
-    // 発行するので、アプリ側で _scheduleRepeat する必要はない。OS の repeat
-    // イベントは _handlePhysicalKey で握りつぶしてあるため、結局 NoteOn は
-    // 1 回だけ送られ、X68k 側のリピートロジックに委ねる形になる。
+    // リピートは画面タップと同じくアプリ側 Timer で実装する (ファームの
+    // SET REPEAT で配られた delay/interval をアプリが受け取り、ここで再送する)。
+    // OS の KeyRepeatEvent は _handlePhysicalKey 側で消費しているので、
+    // この Timer 由来の NoteOn だけが流れる。
+    if (!_noRepeatScancodes.contains(code)) {
+      _scheduleRepeat(code);
+    }
     if (mounted) setState(() {});
   }
 
