@@ -3,6 +3,8 @@ name: Release Build
 on:
   push:
     tags: ['v*.*.*']
+  pull_request:
+    branches: [develop, main]
   workflow_dispatch:
     inputs:
       platform:
@@ -15,6 +17,7 @@ on:
           - android
           - ios
           - macos
+          - windows
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
@@ -357,5 +360,69 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+
+  windows:
+    name: Build Windows
+    runs-on: windows-latest
+    needs: prepare
+    if: github.event_name == 'pull_request' || github.event_name == 'push' || github.event.inputs.platform == 'all' || github.event.inputs.platform == 'windows'
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ needs.prepare.outputs.flutter_version }}
+          channel: stable
+          cache: true
+
+      - name: Cache Windows native build
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/windows
+            windows/flutter/ephemeral
+          key: windows-build-${{ hashFiles('pubspec.lock', 'windows/CMakeLists.txt', 'windows/runner/**', 'windows/flutter/CMakeLists.txt') }}
+          restore-keys: |
+            windows-build-
+
+      - name: Flutter doctor
+        run: flutter doctor -v
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Build Windows release
+        run: >
+          flutter build windows --release
+          --build-name=${{ needs.prepare.outputs.app_version }}
+          --build-number=${{ needs.prepare.outputs.build_number }}
+
+      - name: Package Windows zip
+        id: package
+        shell: pwsh
+        run: |
+          $version = "${{ needs.prepare.outputs.app_version }}"
+          $zipName = "mimicx-windows-v$version.zip"
+          Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath $zipName -Force
+          "zip_name=$zipName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mimicx-windows-${{ needs.prepare.outputs.app_version }}-${{ needs.prepare.outputs.build_number }}
+          path: ${{ steps.package.outputs.zip_name }}
+          retention-days: 14
+
+      - name: Upload Windows zip to GitHub Release
+        if: needs.prepare.outputs.is_release == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.package.outputs.zip_name }}
           generate_release_notes: true
           fail_on_unmatched_files: true

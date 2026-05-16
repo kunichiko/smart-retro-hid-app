@@ -52,8 +52,8 @@ VS Code / Android Studio から開く場合は Flutter SDK の path を `.fvm/fl
 
 タグを起点に GitHub Actions が自動でビルド・署名し、成果物を
 GitHub Releases と Actions artifacts に登録する流れ。
-Android APK / AAB と macOS ZIP は GitHub Release に添付され、iOS IPA / xcarchive
-は Actions artifacts として取得する。
+Android APK / AAB、macOS ZIP、Windows ZIP は GitHub Release に添付され、
+iOS IPA / xcarchive は Actions artifacts として取得する。
 
 ### 1. develop → main を merge
 
@@ -96,11 +96,11 @@ tag を打ち直す (`git tag -d v1.2.3 && git push origin :v1.2.3` で削除し
 ### 4. アーティファクトを確認
 
 GitHub Actions の `Release Build` が成功すると、tag と同名の GitHub Release に
-Android APK / AAB と macOS ZIP が添付される。iOS IPA / xcarchive は workflow run の
-Artifacts からダウンロードする。
+Android APK / AAB、macOS ZIP、Windows ZIP が添付される。iOS IPA / xcarchive は
+workflow run の Artifacts からダウンロードする。
 
-必要に応じて `workflow_dispatch` から `all` / `android` / `ios` / `macos` を選び、
-手動ビルドも実行できる。
+必要に応じて `workflow_dispatch` から `all` / `android` / `ios` / `macos` /
+`windows` を選び、手動ビルドも実行できる。
 
 ### GitHub Actions Secrets
 
