@@ -63,10 +63,14 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
       ),
       LineInputMode(channel: widget.channel, shared: _shared),
     ];
-    // 起動直後に LED 状態を本体と同期: 7 つの LED トグルキーを 2 回ずつ押し、
-    // 1 回ごとに X68000 が返してくる LED 制御コマンドを shared に取り込む。
-    // 計 14 回押すと X68000 側のキーボード状態は net で元に戻り、shared は
-    // 最新の LED 状態を観測完了している。
+    // 起動直後に LED 状態を本体と同期する。X68000 からは "現在の LED 状態を
+    // 問い合わせる" 直接的な手段が無いので、何か LED トグルキーを押して
+    // X68000 が返す LED 制御コマンド (= 全 7 ビットの現状を含むメッセージ)
+    // で状態を学習する。
+    //
+    // 全 7 キーを次々に押すと、排他関係のあるキー (かな↔ローマ字 / ひらがな等)
+    // で状態遷移がズレる恐れがあるため、INS (他と排他関係を持たない) を
+    // 2 回押して 1 回目で全 LED 状態を読み取り、2 回目で INS を元に戻す。
     Future.delayed(const Duration(milliseconds: 500), _syncLedState);
   }
 
@@ -76,14 +80,14 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
   }
 
   Future<void> _syncLedState() async {
-    for (int round = 0; round < 2; round++) {
-      for (final sc in X68kKeyboardSharedState.ledBitToScancode) {
-        if (!mounted) return;
-        widget.midi.sendNoteOn(widget.channel, sc, 127);
-        await Future.delayed(const Duration(milliseconds: 15));
-        widget.midi.sendNoteOff(widget.channel, sc);
-        await Future.delayed(const Duration(milliseconds: 30));
-      }
+    const insScancode = 0x5E;
+    for (int i = 0; i < 2; i++) {
+      if (!mounted) return;
+      widget.midi.sendNoteOn(widget.channel, insScancode, 127);
+      await Future.delayed(const Duration(milliseconds: 30));
+      widget.midi.sendNoteOff(widget.channel, insScancode);
+      // X68000 側で LED 状態を更新 → LED 制御コマンドを返す処理に十分余裕を持たせる
+      await Future.delayed(const Duration(milliseconds: 200));
     }
   }
 
