@@ -3,14 +3,22 @@ name: Windows Build
 on:
   push:
     branches: [develop, main]
+    tags: ['v*']
   pull_request:
     branches: [develop, main]
   workflow_dispatch:
+
+env:
+  # actions/checkout@v4 等が内部で使う Node.js を 24 に上げる。
+  # 2026-09-16 以降は Node.js 20 が runner から削除される予定。
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
 jobs:
   build:
     name: Build Windows Release
     runs-on: windows-latest
+    permissions:
+      contents: write  # softprops/action-gh-release が Release を作成・更新するために必要
 
     steps:
       - name: Checkout
@@ -29,12 +37,55 @@ jobs:
       - name: Get dependencies
         run: flutter pub get
 
+      - name: Determine build name and number
+        id: version
+        shell: bash
+        run: |
+          PUBSPEC_VERSION=$(grep -E '^version:' pubspec.yaml | sed -E 's/version:[[:space:]]*([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+            echo "git tag       : ${GITHUB_REF#refs/tags/}"
+            echo "tag version   : ${TAG_VERSION}"
+            echo "pubspec       : ${PUBSPEC_VERSION}"
+            if [ "${TAG_VERSION}" != "${PUBSPEC_VERSION}" ]; then
+              echo "::error::pubspec.yaml の version (${PUBSPEC_VERSION}) と tag (${TAG_VERSION}) が不一致です"
+              exit 1
+            fi
+            echo "build_name=${TAG_VERSION}" >> "${GITHUB_OUTPUT}"
+            echo "is_release=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "pubspec       : ${PUBSPEC_VERSION} (非リリースビルド)"
+            echo "build_name=${PUBSPEC_VERSION}" >> "${GITHUB_OUTPUT}"
+            echo "is_release=false" >> "${GITHUB_OUTPUT}"
+          fi
+          echo "build_number=${{ github.run_number }}" >> "${GITHUB_OUTPUT}"
+
       - name: Build Windows release
-        run: flutter build windows --release
+        run: >
+          flutter build windows --release
+          --build-name=${{ steps.version.outputs.build_name }}
+          --build-number=${{ steps.version.outputs.build_number }}
+
+      - name: Package zip
+        id: package
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.build_name }}"
+          $zipName = "mimicx-windows-v$version.zip"
+          Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath $zipName -Force
+          "zip_name=$zipName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mimicx-windows-${{ github.sha }}
-          path: build/windows/x64/runner/Release/
+          name: mimicx-windows-${{ steps.version.outputs.build_name }}-${{ github.run_number }}
+          path: ${{ steps.package.outputs.zip_name }}
           retention-days: 14
+
+      - name: Create GitHub Release
+        if: steps.version.outputs.is_release == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.package.outputs.zip_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
