@@ -342,6 +342,13 @@ jobs:
           cp "${IPA}" "dist/MimicX_ios-${{ needs.prepare.outputs.app_version }}.ipa"
           ditto -c -k --sequesterRsrc --keepParent build/ios/archive/Runner.xcarchive "dist/MimicX_ios-${{ needs.prepare.outputs.app_version }}.xcarchive.zip"
 
+      - name: Upload iOS artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: mimicx-ios-${{ needs.prepare.outputs.app_version }}-${{ needs.prepare.outputs.build_number }}
+          path: dist/*
+          retention-days: 14
+
       - name: Upload iOS IPA to App Store Connect
         if: env.UPLOAD_TESTFLIGHT == 'true'
         shell: bash
@@ -349,7 +356,18 @@ jobs:
           set -euo pipefail
           mkdir -p "${HOME}/.appstoreconnect/private_keys"
           KEY_PATH="${HOME}/.appstoreconnect/private_keys/AuthKey_${APPSTORE_KEY_ID}.p8"
-          printf '%s' "${APPSTORE_PRIVATE_KEY}" > "${KEY_PATH}"
+
+          if [[ "${APPSTORE_PRIVATE_KEY}" == *"BEGIN PRIVATE KEY"* ]]; then
+            printf '%s' "${APPSTORE_PRIVATE_KEY}" | perl -pe 's/\\n/\n/g; s/\r$//' > "${KEY_PATH}"
+          else
+            printf '%s' "${APPSTORE_PRIVATE_KEY}" | base64 --decode > "${KEY_PATH}"
+          fi
+
+          if ! grep -q "BEGIN PRIVATE KEY" "${KEY_PATH}"; then
+            echo "::error::APPSTORE_PRIVATE_KEY must be the contents of the App Store Connect API key .p8 file, or its base64-encoded value"
+            exit 1
+          fi
+
           chmod 600 "${KEY_PATH}"
 
           IPA=$(find build/ios/ipa -name '*.ipa' -type f | head -n 1)
@@ -358,13 +376,6 @@ jobs:
             -t ios \
             --apiKey "${APPSTORE_KEY_ID}" \
             --apiIssuer "${APPSTORE_ISSUER_ID}"
-
-      - name: Upload iOS artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: mimicx-ios-${{ needs.prepare.outputs.app_version }}-${{ needs.prepare.outputs.build_number }}
-          path: dist/*
-          retention-days: 14
 
   macos:
     name: Build macOS
