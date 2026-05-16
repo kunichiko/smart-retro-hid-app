@@ -9,6 +9,7 @@ import 'dart:async';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'channel_mode.dart';
 import 'l10n/app_localizations.dart';
 import 'midi_service.dart';
@@ -1552,10 +1553,63 @@ class LineInputMode extends ChannelMode {
   final X68kKeyboardSharedState shared;
   final TextEditingController _controller = TextEditingController();
   // 送信履歴。モードを切り替えても消えないように body 側でなく mode 側に持つ。
+  // SharedPreferences で永続化 (アプリ再起動でも残る)。
   final List<String> _history = [];
-  static const int _maxHistory = 50;
+  static const int _maxHistory = 100;
+  static const String _prefsKey = 'lineInput.history';
 
-  LineInputMode({required this.channel, required this.shared});
+  LineInputMode({required this.channel, required this.shared}) {
+    // 起動時に SharedPreferences から履歴を非同期で読み込む。
+    // 読み込み完了後に notifyListeners() を呼んで body の再描画を促す。
+    _loadHistory();
+  }
+
+  /// 履歴の不変ビュー (body 側からの読み取り用)。
+  List<String> get history => List<String>.unmodifiable(_history);
+
+  Future<void> _loadHistory() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final saved = prefs.getStringList(_prefsKey);
+      if (saved != null && saved.isNotEmpty) {
+        _history
+          ..clear()
+          ..addAll(saved.take(_maxHistory));
+        notifyListeners();
+      }
+    } catch (_) {
+      // 読み込み失敗時は空のままで続行
+    }
+  }
+
+  Future<void> _saveHistory() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setStringList(_prefsKey, _history);
+    } catch (_) {
+      // 保存失敗は無視 (致命的でない)
+    }
+  }
+
+  /// 履歴に追加する。重複は先頭に移動し、上限を超えた末尾を切り捨てる。
+  void addToHistory(String text) {
+    if (text.isEmpty) return;
+    _history.remove(text);
+    _history.insert(0, text);
+    if (_history.length > _maxHistory) {
+      _history.removeRange(_maxHistory, _history.length);
+    }
+    notifyListeners();
+    _saveHistory();
+  }
+
+  /// 履歴から 1 件削除する。
+  void removeFromHistory(String text) {
+    if (_history.remove(text)) {
+      notifyListeners();
+      _saveHistory();
+    }
+  }
 
   @override
   String get id => 'x68k_keyboard.lineInput';
@@ -1576,8 +1630,7 @@ class LineInputMode extends ChannelMode {
       channel: channel,
       controller: _controller,
       shared: shared,
-      history: _history,
-      maxHistory: _maxHistory,
+      mode: this,
     );
   }
 
@@ -1593,16 +1646,14 @@ class _LineInputBody extends StatefulWidget {
   final int channel;
   final TextEditingController controller;
   final X68kKeyboardSharedState shared;
-  final List<String> history;
-  final int maxHistory;
+  final LineInputMode mode;
 
   const _LineInputBody({
     required this.midi,
     required this.channel,
     required this.controller,
     required this.shared,
-    required this.history,
-    required this.maxHistory,
+    required this.mode,
   });
 
   @override
@@ -1615,7 +1666,19 @@ class _LineInputBodyState extends State<_LineInputBody> {
   String _status = '';
 
   @override
+  void initState() {
+    super.initState();
+    // mode の notifyListeners (履歴 load / add / remove) で再描画する。
+    widget.mode.addListener(_onModeChanged);
+  }
+
+  void _onModeChanged() {
+    if (mounted) setState(() {});
+  }
+
+  @override
   void dispose() {
+    widget.mode.removeListener(_onModeChanged);
     _focusNode.dispose();
     super.dispose();
   }
@@ -1811,15 +1874,11 @@ class _LineInputBodyState extends State<_LineInputBody> {
       await ensureCodeMode(false);
       debugPrint('[LineInput] === send done: sent=$sent skipped=$skipped ===');
       if (mounted) {
+        // 履歴に追加 (重複は先頭に移動 + 永続化) し、入力欄をクリア。
+        widget.mode.addToHistory(text);
+        widget.controller.clear();
         setState(() {
           _status = '完了 (送信 $sent 文字, スキップ $skipped 文字)';
-          // 履歴に追加 (重複は先頭に移動)。空送信は来ないのでチェック不要。
-          widget.history.remove(text);
-          widget.history.insert(0, text);
-          if (widget.history.length > widget.maxHistory) {
-            widget.history.removeLast();
-          }
-          widget.controller.clear();
         });
       }
     } catch (e) {
@@ -1917,11 +1976,9 @@ class _LineInputBodyState extends State<_LineInputBody> {
     _focusNode.requestFocus();
   }
 
-  /// 履歴の 1 件を削除する。
+  /// 履歴の 1 件を削除する (永続化も連動)。
   void _removeFromHistory(String text) {
-    setState(() {
-      widget.history.remove(text);
-    });
+    widget.mode.removeFromHistory(text);
     _focusNode.requestFocus();
   }
 
@@ -2015,7 +2072,7 @@ class _LineInputBodyState extends State<_LineInputBody> {
                 border: Border.all(color: colors.outlineVariant),
                 borderRadius: BorderRadius.circular(4),
               ),
-              child: widget.history.isEmpty
+              child: widget.mode.history.isEmpty
                   ? Padding(
                       padding: const EdgeInsets.symmetric(
                           horizontal: 16, vertical: 20),
@@ -2029,12 +2086,12 @@ class _LineInputBodyState extends State<_LineInputBody> {
                     )
                   : Column(
                       children: [
-                        for (final item in widget.history)
+                        for (final item in widget.mode.history)
                           InkWell(
                             onTap: () => _loadFromHistory(item),
                             child: Padding(
                               padding: const EdgeInsets.symmetric(
-                                  horizontal: 12, vertical: 2),
+                                  horizontal: 12, vertical: 4),
                               child: Row(
                                 children: [
                                   Icon(Icons.history,
@@ -2047,15 +2104,17 @@ class _LineInputBodyState extends State<_LineInputBody> {
                                       style: const TextStyle(fontSize: 13),
                                     ),
                                   ),
+                                  // ×: 行高を変えないようコンパクトなボタンに
                                   IconButton(
                                     icon: Icon(Icons.close,
-                                        size: 16, color: hintColor),
+                                        size: 14, color: hintColor),
                                     padding: EdgeInsets.zero,
                                     constraints: const BoxConstraints(
-                                      minWidth: 32,
-                                      minHeight: 32,
+                                      minWidth: 22,
+                                      minHeight: 22,
                                     ),
-                                    splashRadius: 16,
+                                    splashRadius: 12,
+                                    visualDensity: VisualDensity.compact,
                                     tooltip: '履歴から削除',
                                     onPressed: () =>
                                         _removeFromHistory(item),
