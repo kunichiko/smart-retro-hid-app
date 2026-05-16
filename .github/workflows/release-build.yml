@@ -1,0 +1,361 @@
+name: Release Build
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: 'Platform to build'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - android
+          - ios
+          - macos
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+  BUNDLE_ID: jp.ohnaka.MimicX
+
+jobs:
+  prepare:
+    name: Prepare version
+    runs-on: ubuntu-latest
+    outputs:
+      app_version: ${{ steps.version.outputs.app_version }}
+      build_number: ${{ steps.version.outputs.build_number }}
+      flutter_version: ${{ steps.version.outputs.flutter_version }}
+      is_release: ${{ steps.version.outputs.is_release }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Determine versions
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP_VERSION=$(grep -E '^version:' pubspec.yaml | sed -E 's/version:[[:space:]]*([^+]+).*/\1/')
+          FLUTTER_VERSION=$(sed -nE 's/.*"flutter"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' .fvmrc)
+
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+            echo "git tag       : ${GITHUB_REF#refs/tags/}"
+            echo "tag version   : ${TAG_VERSION}"
+            echo "pubspec       : ${APP_VERSION}"
+            if [ "${TAG_VERSION}" != "${APP_VERSION}" ]; then
+              echo "::error::pubspec.yaml version (${APP_VERSION}) does not match tag (${TAG_VERSION})"
+              exit 1
+            fi
+            echo "is_release=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "pubspec       : ${APP_VERSION} (manual build)"
+            echo "is_release=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+          echo "app_version=${APP_VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "build_number=${GITHUB_RUN_NUMBER}" >> "${GITHUB_OUTPUT}"
+          echo "flutter_version=${FLUTTER_VERSION}" >> "${GITHUB_OUTPUT}"
+
+  android:
+    name: Build Android
+    runs-on: ubuntu-latest
+    needs: prepare
+    if: github.event_name == 'push' || github.event.inputs.platform == 'all' || github.event.inputs.platform == 'android'
+    permissions:
+      contents: write
+    env:
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ needs.prepare.outputs.flutter_version }}
+          channel: stable
+          cache: true
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle*', 'android/gradle-wrapper.properties', 'pubspec.lock') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Install Android signing key
+        if: env.ANDROID_KEYSTORE_BASE64 != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::GitHub Secret ${name} is required when ANDROID_KEYSTORE_BASE64 is set"
+              exit 1
+            fi
+          done
+
+          KEYSTORE_PATH="${RUNNER_TEMP}/mimicx-release.keystore"
+          echo "${ANDROID_KEYSTORE_BASE64}" | base64 --decode > "${KEYSTORE_PATH}"
+          echo "ANDROID_KEYSTORE_PATH=${KEYSTORE_PATH}" >> "${GITHUB_ENV}"
+
+      - name: Build Android App Bundle
+        run: >
+          flutter build appbundle --release
+          --build-name=${{ needs.prepare.outputs.app_version }}
+          --build-number=${{ needs.prepare.outputs.build_number }}
+
+      - name: Build universal APK
+        run: >
+          flutter build apk --release
+          --build-name=${{ needs.prepare.outputs.app_version }}
+          --build-number=${{ needs.prepare.outputs.build_number }}
+
+      - name: Package Android artifacts
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          AAB="dist/MimicX_android-${{ needs.prepare.outputs.app_version }}.aab"
+          APK="dist/MimicX_android-universal-${{ needs.prepare.outputs.app_version }}.apk"
+          cp build/app/outputs/bundle/release/app-release.aab "${AAB}"
+          cp build/app/outputs/flutter-apk/app-release.apk "${APK}"
+          echo "aab=${AAB}" >> "${GITHUB_OUTPUT}"
+          echo "apk=${APK}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload Android artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mimicx-android-${{ needs.prepare.outputs.app_version }}-${{ needs.prepare.outputs.build_number }}
+          path: dist/*
+          retention-days: 14
+
+      - name: Upload Android artifacts to GitHub Release
+        if: needs.prepare.outputs.is_release == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+
+  ios:
+    name: Build iOS
+    runs-on: macos-15
+    needs: prepare
+    if: github.event_name == 'push' || github.event.inputs.platform == 'all' || github.event.inputs.platform == 'ios'
+    permissions:
+      contents: read
+    env:
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      IOS_CERTIFICATE_BASE64: ${{ secrets.IOS_CERTIFICATE_BASE64 }}
+      IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+      IOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
+      KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ needs.prepare.outputs.flutter_version }}
+          channel: stable
+          cache: true
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Install iOS signing assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for name in APPLE_TEAM_ID IOS_CERTIFICATE_BASE64 IOS_CERTIFICATE_PASSWORD IOS_PROVISIONING_PROFILE_BASE64 KEYCHAIN_PASSWORD; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::GitHub Secret ${name} is required for iOS archive export"
+              exit 1
+            fi
+          done
+
+          CERTIFICATE_PATH="${RUNNER_TEMP}/ios-signing.p12"
+          PP_PATH="${RUNNER_TEMP}/ios-profile.mobileprovision"
+          KEYCHAIN_PATH="${RUNNER_TEMP}/ios-signing.keychain-db"
+          mkdir -p "${HOME}/Library/MobileDevice/Provisioning Profiles"
+
+          echo "${IOS_CERTIFICATE_BASE64}" | base64 --decode > "${CERTIFICATE_PATH}"
+          echo "${IOS_PROVISIONING_PROFILE_BASE64}" | base64 --decode > "${PP_PATH}"
+
+          security create-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+          security set-keychain-settings -lut 21600 "${KEYCHAIN_PATH}"
+          security unlock-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+          security import "${CERTIFICATE_PATH}" -P "${IOS_CERTIFICATE_PASSWORD}" -A -t cert -f pkcs12 -k "${KEYCHAIN_PATH}"
+          security list-keychain -d user -s "${KEYCHAIN_PATH}" login.keychain-db
+          security set-key-partition-list -S apple-tool:,apple: -s -k "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+
+          PROFILE_UUID=$(/usr/libexec/PlistBuddy -c 'Print UUID' /dev/stdin <<< "$(security cms -D -i "${PP_PATH}")")
+          PROFILE_NAME=$(/usr/libexec/PlistBuddy -c 'Print Name' /dev/stdin <<< "$(security cms -D -i "${PP_PATH}")")
+          cp "${PP_PATH}" "${HOME}/Library/MobileDevice/Provisioning Profiles/${PROFILE_UUID}.mobileprovision"
+
+          {
+            echo "IOS_PROFILE_UUID=${PROFILE_UUID}"
+            echo "IOS_PROFILE_NAME=${PROFILE_NAME}"
+          } >> "${GITHUB_ENV}"
+
+      - name: Generate ExportOptions.plist
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "${RUNNER_TEMP}/ExportOptions.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>ad-hoc</string>
+            <key>signingStyle</key>
+            <string>manual</string>
+            <key>teamID</key>
+            <string>${APPLE_TEAM_ID}</string>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>${BUNDLE_ID}</key>
+              <string>${IOS_PROFILE_NAME}</string>
+            </dict>
+          </dict>
+          </plist>
+          PLIST
+
+      - name: Build iOS archive
+        run: >
+          flutter build ipa --release
+          --build-name=${{ needs.prepare.outputs.app_version }}
+          --build-number=${{ needs.prepare.outputs.build_number }}
+          --export-options-plist="${RUNNER_TEMP}/ExportOptions.plist"
+
+      - name: Package iOS artifacts
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          IPA=$(find build/ios/ipa -name '*.ipa' -type f | head -n 1)
+          cp "${IPA}" "dist/MimicX_ios-${{ needs.prepare.outputs.app_version }}.ipa"
+          ditto -c -k --sequesterRsrc --keepParent build/ios/archive/Runner.xcarchive "dist/MimicX_ios-${{ needs.prepare.outputs.app_version }}.xcarchive.zip"
+
+      - name: Upload iOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mimicx-ios-${{ needs.prepare.outputs.app_version }}-${{ needs.prepare.outputs.build_number }}
+          path: dist/*
+          retention-days: 14
+
+  macos:
+    name: Build macOS
+    runs-on: macos-15
+    needs: prepare
+    if: github.event_name == 'push' || github.event.inputs.platform == 'all' || github.event.inputs.platform == 'macos'
+    permissions:
+      contents: write
+    env:
+      MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ needs.prepare.outputs.flutter_version }}
+          channel: stable
+          cache: true
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Install macOS signing certificate
+        if: env.MACOS_CERTIFICATE_BASE64 != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${MACOS_CERTIFICATE_PASSWORD:-}" ] || [ -z "${KEYCHAIN_PASSWORD:-}" ]; then
+            echo "::error::MACOS_CERTIFICATE_PASSWORD and KEYCHAIN_PASSWORD are required when MACOS_CERTIFICATE_BASE64 is set"
+            exit 1
+          fi
+
+          CERTIFICATE_PATH="${RUNNER_TEMP}/macos-signing.p12"
+          KEYCHAIN_PATH="${RUNNER_TEMP}/macos-signing.keychain-db"
+          echo "${MACOS_CERTIFICATE_BASE64}" | base64 --decode > "${CERTIFICATE_PATH}"
+
+          security create-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+          security set-keychain-settings -lut 21600 "${KEYCHAIN_PATH}"
+          security unlock-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+          security import "${CERTIFICATE_PATH}" -P "${MACOS_CERTIFICATE_PASSWORD}" -A -t cert -f pkcs12 -k "${KEYCHAIN_PATH}"
+          security list-keychain -d user -s "${KEYCHAIN_PATH}" login.keychain-db
+          security set-key-partition-list -S apple-tool:,apple: -s -k "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+
+      - name: Build macOS release
+        run: >
+          flutter build macos --release
+          --build-name=${{ needs.prepare.outputs.app_version }}
+          --build-number=${{ needs.prepare.outputs.build_number }}
+
+      - name: Package macOS zip
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd build/macos/Build/Products/Release
+          PACKAGE_DIR="MimicX_macos-${{ needs.prepare.outputs.app_version }}"
+          ZIP_NAME="${PACKAGE_DIR}.zip"
+          mkdir "${PACKAGE_DIR}"
+          mv "Mimic X.app" "${PACKAGE_DIR}/"
+          ditto -c -k --sequesterRsrc --keepParent "${PACKAGE_DIR}" "${ZIP_NAME}"
+          mkdir -p "${GITHUB_WORKSPACE}/dist"
+          cp "${ZIP_NAME}" "${GITHUB_WORKSPACE}/dist/${ZIP_NAME}"
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mimicx-macos-${{ needs.prepare.outputs.app_version }}-${{ needs.prepare.outputs.build_number }}
+          path: dist/*
+          retention-days: 14
+
+      - name: Upload macOS zip to GitHub Release
+        if: needs.prepare.outputs.is_release == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

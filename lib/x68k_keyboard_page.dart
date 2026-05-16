@@ -1746,7 +1746,7 @@ class _LineInputBodyState extends State<_LineInputBody> {
         if (mounted) setState(() => _status = 'エラー: $e');
       } finally {
         if (mounted) setState(() => _sending = false);
-        _focusNode.requestFocus();
+        _restoreFocusAfterFrame();
       }
       return;
     }
@@ -1835,8 +1835,17 @@ class _LineInputBodyState extends State<_LineInputBody> {
       if (mounted) {
         setState(() => _sending = false);
       }
-      _focusNode.requestFocus();
+      _restoreFocusAfterFrame();
     }
+  }
+
+  /// TextField.onSubmitted は内部で focus を外す挙動があるため、次フレーム以降に
+  /// 改めて requestFocus する。同期的に呼ぶと、TextField 側の unfocus に上書き
+  /// されてしまう。
+  void _restoreFocusAfterFrame() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _focusNode.requestFocus();
+    });
   }
 
   /// SJIS のコードを 4 桁 hex (16-bit 値 MSB から) として X68000 のキー入力で送る。
