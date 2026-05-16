@@ -8,9 +8,17 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'channel_mode.dart';
 import 'l10n/app_localizations.dart';
 import 'midi_service.dart';
+import 'mode_scaffold.dart';
 import 'orientation_helper.dart';
+
+// ===========================================================================
+// X68kKeyboardPage 本体
+// 当面はモードが 1 つ (StandardX68kMode) だけだが、将来フリック入力モード等を
+// 増やす想定で ModeScaffold に乗せている。1 モードならドロップダウンは非表示。
+// ===========================================================================
 
 class X68kKeyboardPage extends StatefulWidget {
   final MidiService midi;
@@ -31,14 +39,127 @@ class X68kKeyboardPage extends StatefulWidget {
 }
 
 class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
+  late final List<ChannelMode> _modes;
+
+  @override
+  void initState() {
+    super.initState();
+    OrientationHelper.landscape();
+    _modes = [
+      StandardX68kMode(
+        channel: widget.channel,
+        mouseChannel: widget.mouseChannel,
+      ),
+    ];
+  }
+
+  @override
+  void dispose() {
+    for (final m in _modes) {
+      m.dispose();
+    }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ModeScaffold(
+      title: AppLocalizations.of(context)!.x68kKeyboardTitle,
+      midi: widget.midi,
+      modes: _modes,
+    );
+  }
+}
+
+// ===========================================================================
+// X68000 標準キーボードモード
+// テンキー / トラックパッドの表示トグルはこのモードの状態として保持し、
+// AppBar アクションとして提供する。
+// ===========================================================================
+
+class StandardX68kMode extends ChannelMode {
+  final int channel;
+  final int? mouseChannel;
+
+  bool _numpadVisible = true;
+  bool _trackpadVisible = true;
+
+  StandardX68kMode({required this.channel, this.mouseChannel});
+
+  @override
+  String get id => 'x68k_keyboard.standard';
+
+  @override
+  String label(BuildContext context) =>
+      AppLocalizations.of(context)!.x68kKeyboardTitle;
+
+  void _toggleNumpad() {
+    _numpadVisible = !_numpadVisible;
+    notifyListeners();
+  }
+
+  void _toggleTrackpad() {
+    _trackpadVisible = !_trackpadVisible;
+    notifyListeners();
+  }
+
+  @override
+  Widget buildBody(BuildContext context, MidiService midi) {
+    return _X68kKeyboardBody(
+      midi: midi,
+      channel: channel,
+      mouseChannel: mouseChannel,
+      numpadVisible: _numpadVisible,
+      trackpadVisible: _trackpadVisible,
+    );
+  }
+
+  @override
+  List<Widget> buildActions(BuildContext context) {
+    return [
+      if (mouseChannel != null)
+        IconButton(
+          tooltip: _trackpadVisible ? 'トラックパッドを非表示' : 'トラックパッドを表示',
+          icon: Icon(
+              _trackpadVisible ? Icons.touch_app : Icons.touch_app_outlined),
+          onPressed: _toggleTrackpad,
+        ),
+      IconButton(
+        tooltip: _numpadVisible ? 'テンキーを非表示' : 'テンキーを表示',
+        icon: Icon(_numpadVisible ? Icons.dialpad : Icons.dialpad_outlined),
+        onPressed: _toggleNumpad,
+      ),
+    ];
+  }
+}
+
+// ===========================================================================
+// キーボード本体 Widget。AppBar 以外のすべての本体ロジック
+// (キー押下/リリース、リピート、ポップアップ、LED 状態、レイアウト等) を担う。
+// ===========================================================================
+
+class _X68kKeyboardBody extends StatefulWidget {
+  final MidiService midi;
+  final int channel;
+  final int? mouseChannel;
+  final bool numpadVisible;
+  final bool trackpadVisible;
+
+  const _X68kKeyboardBody({
+    required this.midi,
+    required this.channel,
+    required this.mouseChannel,
+    required this.numpadVisible,
+    required this.trackpadVisible,
+  });
+
+  @override
+  State<_X68kKeyboardBody> createState() => _X68kKeyboardBodyState();
+}
+
+class _X68kKeyboardBodyState extends State<_X68kKeyboardBody> {
   // 押下中のキー (重複送信防止用)
   final Set<int> _pressed = {};
-
-  // テンキーを表示するか (オフだとメインキーが大きく表示される)
-  bool _numpadVisible = true;
-
-  // トラックパッドを表示するか (mouseChannel が来てる時のみ意味を持つ)
-  bool _trackpadVisible = true;
 
   // X68000 LED 制御コマンド (bit7=1) の各ビット → 対応キーのスキャンコード
   //   bit0: かな, bit1: ローマ字, bit2: コード入力, bit3: CAPS,
@@ -137,8 +258,7 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
   @override
   void initState() {
     super.initState();
-    OrientationHelper.landscape();
-
+    // 横向き固定は外側の X68kKeyboardPage で済ませてある。
     _prevTargetRxHandler = widget.midi.onTargetRx;
     widget.midi.onTargetRx = _handleTargetRx;
   }
@@ -338,29 +458,13 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
   @override
   Widget build(BuildContext context) {
     final hasMouse = widget.mouseChannel != null;
-    return Scaffold(
-      backgroundColor: const Color(0xFF1a1a1a),
-      appBar: AppBar(
-        title: Text(AppLocalizations.of(context)!.x68kKeyboardTitle),
-        backgroundColor: const Color(0xFF000000),
-        actions: [
-          if (hasMouse)
-            IconButton(
-              tooltip: _trackpadVisible ? 'トラックパッドを非表示' : 'トラックパッドを表示',
-              icon: Icon(_trackpadVisible ? Icons.touch_app : Icons.touch_app_outlined),
-              onPressed: () => setState(() => _trackpadVisible = !_trackpadVisible),
-            ),
-          IconButton(
-            tooltip: _numpadVisible ? 'テンキーを非表示' : 'テンキーを表示',
-            icon: Icon(_numpadVisible ? Icons.dialpad : Icons.dialpad_outlined),
-            onPressed: () => setState(() => _numpadVisible = !_numpadVisible),
-          ),
-        ],
-      ),
-      body: SafeArea(
+    // 背景色は ModeScaffold ではなく body 側で持つ (キーボードページの黒地)。
+    return Container(
+      color: const Color(0xFF1a1a1a),
+      child: SafeArea(
         child: LayoutBuilder(
           builder: (context, constraints) {
-            final showTrackpad = hasMouse && _trackpadVisible;
+            final showTrackpad = hasMouse && widget.trackpadVisible;
             if (!showTrackpad) {
               return _buildKeyboard(constraints);
             }
@@ -399,7 +503,7 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
   static const double _numpadAreaW = 4.0;
   static const double _gap = 0.3;
 
-  double get _totalW => _numpadVisible
+  double get _totalW => widget.numpadVisible
       ? _mainAreaW + _gap + _cursorAreaW + _gap + _numpadAreaW
       : _mainAreaW + _gap + _cursorAreaW;
 
@@ -501,7 +605,7 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
             ),
           ),
           // テンキー ENTER (縦 2 段) — テンキー表示時のみ
-          if (_numpadVisible)
+          if (widget.numpadVisible)
             Positioned(
               left: xNumpadEnter,
               top: yRow4,
@@ -550,7 +654,7 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
   }
 
   // 行を「main + gap + cursor + gap + numpad」形式で組み立てる
-  // _numpadVisible=false のときは numpad 部分を完全に省略する
+  // widget.numpadVisible=false のときは numpad 部分を完全に省略する
   Widget _row3({
     required double u,
     required double h,
@@ -568,7 +672,7 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
         SizedBox(width: u * _gap),
         ...cursor,
         SizedBox(width: u * (_cursorAreaW - cursorSumU)),
-        if (_numpadVisible) ...[
+        if (widget.numpadVisible) ...[
           SizedBox(width: u * _gap),
           ...numpad,
           SizedBox(width: u * (_numpadAreaW - numpadSumU)),

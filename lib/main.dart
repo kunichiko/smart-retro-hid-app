@@ -5,13 +5,12 @@ import 'l10n/app_localizations.dart';
 import 'midi_service.dart';
 import 'protocol.dart';
 import 'joystick_page.dart';
-import 'joystick_settings.dart';
 import 'orientation_helper.dart';
 import 'x68k_keyboard_page.dart';
 
-void main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-  await JoystickSettings.instance.load();
+void main() {
+  // JoystickSettings はモード毎にインスタンスを持って onEnter で lazy load する。
+  // (以前はグローバル singleton をここで preload していた)
   runApp(const SmartRetroHidApp());
 }
 

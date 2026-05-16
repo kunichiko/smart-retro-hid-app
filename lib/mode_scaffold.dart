@@ -1,0 +1,181 @@
+// ===================================================================================
+// ChannelMode をドロップダウンで切り替えながら表示する Scaffold。
+//
+// 主な責務:
+//   - AppBar の title 横に DropdownButton<ChannelMode> を出す (modes.length >= 2 のみ)
+//   - 初回 mount で initialMode.onEnter() を呼ぶ
+//   - ドロップダウン操作で current.onExit() → setState → next.onEnter() を直列実行
+//   - unmount 時に current.onExit() を呼ぶ
+//   - 現在モードが buildSettings() を返せば歯車アイコンを表示し、タップで開く
+//   - persistenceKey を渡せば最後に選択したモードを SharedPreferences に保存
+//
+// ChannelMode 自体の dispose は本 Scaffold では行わない (作成側=ページ State が責任)。
+// ===================================================================================
+
+import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'channel_mode.dart';
+import 'l10n/app_localizations.dart';
+import 'midi_service.dart';
+
+class ModeScaffold extends StatefulWidget {
+  final String title;
+  final MidiService midi;
+  final List<ChannelMode> modes;
+
+  /// 設定 SharedPreferences に「最後に選択したモードの id」を保存するキー。
+  /// null なら永続化しない。
+  final String? persistenceKey;
+
+  /// AppBar の actions 末尾に追加するウィジェット (設定アイコン以外のページ独自項目)。
+  final List<Widget> extraActions;
+
+  const ModeScaffold({
+    super.key,
+    required this.title,
+    required this.midi,
+    required this.modes,
+    this.persistenceKey,
+    this.extraActions = const [],
+  }) : assert(modes.length > 0, 'modes must contain at least one ChannelMode');
+
+  @override
+  State<ModeScaffold> createState() => _ModeScaffoldState();
+}
+
+class _ModeScaffoldState extends State<ModeScaffold> {
+  late ChannelMode _current;
+  // モード切替中フラグ。連打で同時に onEnter/onExit が走らないようガード。
+  bool _switching = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _current = widget.modes.first;
+    // 初期 mount での onEnter / 永続化された選択モードの復元を順次実行。
+    // build より後に走らせたいので microtask で。
+    Future.microtask(_initialize);
+  }
+
+  Future<void> _initialize() async {
+    final restored = await _restorePersistedMode();
+    if (restored != null && restored != _current) {
+      if (mounted) setState(() => _current = restored);
+    }
+    await _current.onEnter(widget.midi);
+  }
+
+  Future<ChannelMode?> _restorePersistedMode() async {
+    final key = widget.persistenceKey;
+    if (key == null) return null;
+    final prefs = await SharedPreferences.getInstance();
+    final savedId = prefs.getString(key);
+    if (savedId == null) return null;
+    for (final m in widget.modes) {
+      if (m.id == savedId) return m;
+    }
+    return null;
+  }
+
+  Future<void> _persistSelectedMode(ChannelMode mode) async {
+    final key = widget.persistenceKey;
+    if (key == null) return;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(key, mode.id);
+  }
+
+  Future<void> _switchTo(ChannelMode next) async {
+    if (_switching || next == _current) return;
+    _switching = true;
+    try {
+      await _current.onExit(widget.midi);
+      if (!mounted) return;
+      setState(() => _current = next);
+      await next.onEnter(widget.midi);
+      await _persistSelectedMode(next);
+    } finally {
+      _switching = false;
+    }
+  }
+
+  @override
+  void dispose() {
+    // 非同期 dispose は呼べないので fire-and-forget で onExit を投げる。
+    // この時点で widget は unmount 済み → setState は呼ばれない。
+    _current.onExit(widget.midi);
+    super.dispose();
+  }
+
+  Widget _buildModeSelector() {
+    if (widget.modes.length < 2) return const SizedBox.shrink();
+    return DropdownButtonHideUnderline(
+      child: DropdownButton<ChannelMode>(
+        value: _current,
+        // AppBar は背景色がプライマリなので、メニューの背景も合わせる。
+        dropdownColor: Theme.of(context).colorScheme.surfaceContainerHigh,
+        iconEnabledColor: Theme.of(context).colorScheme.onPrimary,
+        style: TextStyle(
+          color: Theme.of(context).colorScheme.onPrimary,
+          fontSize: 14,
+        ),
+        items: [
+          for (final m in widget.modes)
+            DropdownMenuItem<ChannelMode>(
+              value: m,
+              child: Text(m.label(context)),
+            ),
+        ],
+        onChanged: _switching
+            ? null
+            : (m) {
+                if (m != null) _switchTo(m);
+              },
+      ),
+    );
+  }
+
+  void _openSettings(Widget sheet) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => sheet,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // 現在モードが notifyListeners() を呼べば AppBar / body を含めて rebuild する。
+    return AnimatedBuilder(
+      animation: _current,
+      builder: (context, _) {
+        final settingsSheet = _current.buildSettings(context);
+        return Scaffold(
+          appBar: AppBar(
+            title: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Flexible(
+                    child: Text(widget.title, overflow: TextOverflow.ellipsis)),
+                if (widget.modes.length >= 2) ...[
+                  const SizedBox(width: 12),
+                  _buildModeSelector(),
+                ],
+              ],
+            ),
+            actions: [
+              ..._current.buildActions(context),
+              if (settingsSheet != null)
+                IconButton(
+                  icon: const Icon(Icons.tune),
+                  tooltip: AppLocalizations.of(context)!.controllerSettings,
+                  onPressed: () => _openSettings(settingsSheet),
+                ),
+              ...widget.extraActions,
+            ],
+          ),
+          body: _current.buildBody(context, widget.midi),
+        );
+      },
+    );
+  }
+}

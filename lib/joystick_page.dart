@@ -4,22 +4,17 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'channel_mode.dart';
 import 'l10n/app_localizations.dart';
 import 'midi_service.dart';
+import 'mode_scaffold.dart';
 import 'joystick_settings.dart';
 import 'orientation_helper.dart';
 
-/// 連射対象の候補。設定シートの ON/OFF 表示順序もこの順。
-const List<({int note, String label})> _turboCandidates = [
-  (note: MidiService.noteX, label: 'X'),
-  (note: MidiService.noteY, label: 'Y'),
-  (note: MidiService.noteZ, label: 'Z'),
-  (note: MidiService.noteA, label: 'A'),
-  (note: MidiService.noteB, label: 'B'),
-  (note: MidiService.noteC, label: 'C'),
-];
-
-enum PadMode { atari, md6 }
+// ===========================================================================
+// JoystickPage 本体
+// 横向き固定 + 複数モード (ATARI / MD6 / 将来追加) を ModeScaffold で切り替え。
+// ===========================================================================
 
 class JoystickPage extends StatefulWidget {
   final MidiService midi;
@@ -36,74 +31,150 @@ class JoystickPage extends StatefulWidget {
 }
 
 class _JoystickPageState extends State<JoystickPage> {
-  PadMode _mode = PadMode.atari;
-  final JoystickSettings _settings = JoystickSettings.instance;
+  late final List<ChannelMode> _modes;
 
   @override
   void initState() {
     super.initState();
     // 横向き固定 (Android では auto-rotate ロックを無視して両方向許容)
     OrientationHelper.landscape();
-    _settings.addListener(_onSettingsChanged);
+    _modes = [
+      AtariMode(channel: widget.channel),
+      Md6Mode(channel: widget.channel),
+    ];
   }
 
   @override
   void dispose() {
-    _settings.removeListener(_onSettingsChanged);
+    for (final m in _modes) {
+      m.dispose();
+    }
     super.dispose();
-  }
-
-  void _onSettingsChanged() {
-    if (mounted) setState(() {});
-  }
-
-  void _showSettings() {
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,  // 横画面でも縦余白を確保するためフルハイト許可
-      builder: (ctx) => _SettingsSheet(settings: _settings),
-    );
   }
 
   @override
   Widget build(BuildContext context) {
     final l = AppLocalizations.of(context)!;
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(l.joystickTitle),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.tune),
-            tooltip: l.controllerSettings,
-            onPressed: _showSettings,
-          ),
-          SegmentedButton<PadMode>(
-            segments: [
-              ButtonSegment(value: PadMode.atari, label: Text(l.padModeAtari)),
-              ButtonSegment(value: PadMode.md6, label: Text(l.padModeMd6)),
-            ],
-            selected: {_mode},
-            onSelectionChanged: (v) {
-              setState(() => _mode = v.first);
-              widget.midi.setPadMode(_mode == PadMode.atari ? 0 : 1);
-            },
-          ),
-          const SizedBox(width: 12),
-        ],
-      ),
-      // OS の回転がまだ完了していない過渡フレームでは portrait の幅で
-      // レイアウトが組まれて RenderFlex がオーバーフローするので、
-      // landscape になるまで描画を保留する。
-      body: OrientationBuilder(
-        builder: (context, orientation) {
-          if (orientation != Orientation.landscape) {
-            return const SizedBox.expand();
-          }
-          return _mode == PadMode.atari
-              ? _AtariLayout(midi: widget.midi, settings: _settings)
-              : _Md6Layout(midi: widget.midi, settings: _settings);
-        },
-      ),
+    return ModeScaffold(
+      title: l.joystickTitle,
+      midi: widget.midi,
+      modes: _modes,
+      persistenceKey: 'joystick.selectedMode',
+    );
+  }
+}
+
+// ===========================================================================
+// 各モード
+// ===========================================================================
+
+/// ATARI 互換 2 ボタンモード。
+class AtariMode extends ChannelMode {
+  final int channel;
+  final JoystickSettings _settings =
+      JoystickSettings(prefix: 'joystick.atari');
+
+  AtariMode({required this.channel});
+
+  /// このモードで連射対象になり得るボタン。
+  static const List<({int note, String label})> _turboCandidates = [
+    (note: MidiService.noteA, label: 'A'),
+    (note: MidiService.noteB, label: 'B'),
+  ];
+
+  @override
+  String get id => 'joystick.atari';
+
+  @override
+  String label(BuildContext context) =>
+      AppLocalizations.of(context)!.padModeAtari;
+
+  @override
+  Future<void> onEnter(MidiService midi) async {
+    await _settings.load();
+    // ファームのパッドモードを ATARI (0) に切替
+    midi.setPadMode(0);
+  }
+
+  @override
+  Widget buildBody(BuildContext context, MidiService midi) {
+    return _LandscapeGate(child: _AtariLayout(midi: midi, settings: _settings));
+  }
+
+  @override
+  Widget buildSettings(BuildContext context) =>
+      _SettingsSheet(settings: _settings, turboCandidates: _turboCandidates);
+
+  @override
+  void dispose() {
+    _settings.dispose();
+    super.dispose();
+  }
+}
+
+/// メガドライブ 6 ボタンパッド互換モード。
+class Md6Mode extends ChannelMode {
+  final int channel;
+  final JoystickSettings _settings =
+      JoystickSettings(prefix: 'joystick.md6');
+
+  Md6Mode({required this.channel});
+
+  static const List<({int note, String label})> _turboCandidates = [
+    (note: MidiService.noteX, label: 'X'),
+    (note: MidiService.noteY, label: 'Y'),
+    (note: MidiService.noteZ, label: 'Z'),
+    (note: MidiService.noteA, label: 'A'),
+    (note: MidiService.noteB, label: 'B'),
+    (note: MidiService.noteC, label: 'C'),
+  ];
+
+  @override
+  String get id => 'joystick.md6';
+
+  @override
+  String label(BuildContext context) =>
+      AppLocalizations.of(context)!.padModeMd6;
+
+  @override
+  Future<void> onEnter(MidiService midi) async {
+    await _settings.load();
+    // ファームのパッドモードを MD 6B (1) に切替
+    midi.setPadMode(1);
+  }
+
+  @override
+  Widget buildBody(BuildContext context, MidiService midi) {
+    return _LandscapeGate(child: _Md6Layout(midi: midi, settings: _settings));
+  }
+
+  @override
+  Widget buildSettings(BuildContext context) =>
+      _SettingsSheet(settings: _settings, turboCandidates: _turboCandidates);
+
+  @override
+  void dispose() {
+    _settings.dispose();
+    super.dispose();
+  }
+}
+
+/// OS の回転がまだ完了していない過渡フレームでは portrait 幅でレイアウトが
+/// 組まれて RenderFlex がオーバーフローするので、landscape になるまで描画を
+/// 保留する。
+class _LandscapeGate extends StatelessWidget {
+  final Widget child;
+  const _LandscapeGate({required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    return OrientationBuilder(
+      builder: (context, orientation) {
+        if (orientation != Orientation.landscape) {
+          return const SizedBox.expand();
+        }
+        return child;
+      },
     );
   }
 }
@@ -766,7 +837,13 @@ class _SingleButtonState extends State<_SingleButton> {
 
 class _SettingsSheet extends StatefulWidget {
   final JoystickSettings settings;
-  const _SettingsSheet({required this.settings});
+  /// このモードで連射対象になり得るボタン (FilterChip の表示順)。
+  final List<({int note, String label})> turboCandidates;
+
+  const _SettingsSheet({
+    required this.settings,
+    required this.turboCandidates,
+  });
 
   @override
   State<_SettingsSheet> createState() => _SettingsSheetState();
@@ -884,7 +961,7 @@ class _SettingsSheetState extends State<_SettingsSheet> {
               spacing: 8,
               runSpacing: 8,
               children: [
-                for (final c in _turboCandidates)
+                for (final c in widget.turboCandidates)
                   FilterChip(
                     label: Text(c.label),
                     selected: widget.settings.isTurbo(c.note),

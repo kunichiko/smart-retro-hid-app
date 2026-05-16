@@ -1,0 +1,51 @@
+// ===================================================================================
+// 1 つの MIDI チャンネル (= 1 つの仮想 HID デバイス) に対して、複数の UI 変種を
+// 切り替えるための抽象。
+//
+// たとえば「ATARI Joystick」というチャンネルでも:
+//   - 2 ボタンモード (A/B)
+//   - MD 6B モード (A/B/C + X/Y/Z)
+//   - 将来追加される特殊パッドモード
+// のように複数の UI を提供できる。本クラスはそれらを統一的に扱うインターフェース。
+//
+// ChannelMode は以下を提供する:
+//   - id              : 永続化キーとして使う安定文字列
+//   - label(ctx)      : ドロップダウン表示用のローカライズ済みラベル
+//   - onEnter / onExit: モード切替時の前後処理 (SysEx でファームのモード変更等)
+//   - buildBody       : このモードの操作 UI 本体
+//   - buildSettings?  : 設定シート (null なら歯車アイコン非表示)
+//   - dispose         : このモードが保持するリソースの解放 (ChangeNotifier 等)
+// ===================================================================================
+
+import 'package:flutter/material.dart';
+import 'midi_service.dart';
+
+/// 1 つの ChannelMode は 1 つの仮想 HID のひとつの UI 変種を表す。
+///
+/// [ChangeNotifier] を継承しているので、モード自身が抱える状態 (例: テンキー
+/// 表示の ON/OFF) を変更したら [notifyListeners] を呼ぶことで、ホスト Scaffold
+/// が AppBar / body を rebuild する。
+abstract class ChannelMode extends ChangeNotifier {
+  /// 永続化に使う安定 ID (例: "joystick.atari", "joystick.md6")。
+  String get id;
+
+  /// ドロップダウンに表示するローカライズ済みラベル。
+  String label(BuildContext context);
+
+  /// このモードがアクティブになった時 (ページ初期 mount または別モードからの切替) に
+  /// 呼ばれる。ファームウェアにモード切替コマンドを送るような処理をここに書く。
+  Future<void> onEnter(MidiService midi) async {}
+
+  /// このモードを抜ける時 (別モードに切替 / ページ unmount) に呼ばれる。
+  Future<void> onExit(MidiService midi) async {}
+
+  /// このモードの操作 UI 本体。Scaffold.body に挿入される想定。
+  Widget buildBody(BuildContext context, MidiService midi);
+
+  /// 設定シート Widget。null なら歯車アイコンを表示しない。
+  Widget? buildSettings(BuildContext context) => null;
+
+  /// このモード固有の AppBar アクション (歯車以外)。デフォルトは空。
+  /// テンキー表示トグルなどモード固有のトグル類はここで返す。
+  List<Widget> buildActions(BuildContext context) => const [];
+}
