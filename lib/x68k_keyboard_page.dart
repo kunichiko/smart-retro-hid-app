@@ -1917,6 +1917,14 @@ class _LineInputBodyState extends State<_LineInputBody> {
     _focusNode.requestFocus();
   }
 
+  /// 履歴の 1 件を削除する。
+  void _removeFromHistory(String text) {
+    setState(() {
+      widget.history.remove(text);
+    });
+    _focusNode.requestFocus();
+  }
+
   /// 機能キー (BS / DEL / TAB / ESC / INS / カーソル等) を 1 回押下する。
   /// 履歴やテキストフィールドには影響せず、X68000 へ即座に送る。
   Future<void> _pressFunctionKey(int scancode) async {
@@ -2026,7 +2034,7 @@ class _LineInputBodyState extends State<_LineInputBody> {
                             onTap: () => _loadFromHistory(item),
                             child: Padding(
                               padding: const EdgeInsets.symmetric(
-                                  horizontal: 12, vertical: 6),
+                                  horizontal: 12, vertical: 2),
                               child: Row(
                                 children: [
                                   Icon(Icons.history,
@@ -2038,6 +2046,19 @@ class _LineInputBodyState extends State<_LineInputBody> {
                                       overflow: TextOverflow.ellipsis,
                                       style: const TextStyle(fontSize: 13),
                                     ),
+                                  ),
+                                  IconButton(
+                                    icon: Icon(Icons.close,
+                                        size: 16, color: hintColor),
+                                    padding: EdgeInsets.zero,
+                                    constraints: const BoxConstraints(
+                                      minWidth: 32,
+                                      minHeight: 32,
+                                    ),
+                                    splashRadius: 16,
+                                    tooltip: '履歴から削除',
+                                    onPressed: () =>
+                                        _removeFromHistory(item),
                                   ),
                                 ],
                               ),
