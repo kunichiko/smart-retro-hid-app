@@ -517,15 +517,19 @@ class _X68kKeyboardBodyState extends State<_X68kKeyboardBody> {
     LogicalKeyboardKey.period: 0x32,
     LogicalKeyboardKey.slash: 0x33,
     LogicalKeyboardKey.semicolon: 0x27,
-    // JIS 配列固有の記号キー (US 配列だと別の物理位置・別の logical key)。
-    // X68k は JIS なので、JIS キーボードで打ったままの文字 = X68k の同じキー。
-    LogicalKeyboardKey.equal: 0x0D,        // JIS の ^ (US は =)
-    LogicalKeyboardKey.intlYen: 0x0E,      // ¥
-    LogicalKeyboardKey.bracketLeft: 0x1B,  // JIS の @ (US は [)
-    LogicalKeyboardKey.bracketRight: 0x1C, // JIS の [ (US は ])
-    LogicalKeyboardKey.quote: 0x28,        // JIS の : (US は ')
-    LogicalKeyboardKey.backslash: 0x29,    // JIS の ] (US は \)
-    LogicalKeyboardKey.intlRo: 0x34,       // _ (JIS 専用キー)
+    // 記号系の追加マッピング。LogicalKeyboardKey は USASCII 文字基準の命名なので、
+    // 「produced character = JIS のキー」と読めば素直に対応する。
+    // JIS 配列で専用キーがあるもの (caret / at / colon / yen / ro) と、US/JIS で
+    // 同一文字を出すブラケット記号、US 配列固有の backslash まで網羅する。
+    LogicalKeyboardKey.caret: 0x0D,         // ^
+    LogicalKeyboardKey.intlYen: 0x0E,       // ¥
+    LogicalKeyboardKey.at: 0x1B,            // @ (JIS 専用キー)
+    LogicalKeyboardKey.bracketLeft: 0x1C,   // [
+    LogicalKeyboardKey.colon: 0x28,         // : (JIS 専用キー)
+    LogicalKeyboardKey.bracketRight: 0x29,  // ]
+    LogicalKeyboardKey.intlRo: 0x34,        // _ (JIS 専用キーの素押し)
+    LogicalKeyboardKey.underscore: 0x34,    // _ (OS 側で shift 解決される場合)
+    LogicalKeyboardKey.backslash: 0x0E,     // \ (US 専用キー → JIS ¥ と等価)
     // テンキー (numpad)。OS は NumLock 状態に依らず logical key を出す。
     LogicalKeyboardKey.numpad0: 0x4F,
     LogicalKeyboardKey.numpad1: 0x4B,
@@ -571,9 +575,10 @@ class _X68kKeyboardBodyState extends State<_X68kKeyboardBody> {
     if (_pressed.contains(code)) return;
     _pressed.add(code);
     widget.midi.sendNoteOn(widget.channel, code, 127);
-    if (!_noRepeatScancodes.contains(code)) {
-      _scheduleRepeat(code);
-    }
+    // 物理キーボードはホスト OS が自前でオートリピート (KeyRepeatEvent) を
+    // 発行するので、アプリ側で _scheduleRepeat する必要はない。OS の repeat
+    // イベントは _handlePhysicalKey で握りつぶしてあるため、結局 NoteOn は
+    // 1 回だけ送られ、X68k 側のリピートロジックに委ねる形になる。
     if (mounted) setState(() {});
   }
 
