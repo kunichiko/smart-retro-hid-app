@@ -182,7 +182,7 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           AAB="dist/MimicX_android-${{ needs.prepare.outputs.app_version }}.aab"
-          APK="dist/MimicX_android-universal-${{ needs.prepare.outputs.app_version }}.apk"
+          APK="dist/MimicX_android-${{ needs.prepare.outputs.app_version }}.apk"
           cp build/app/outputs/bundle/release/app-release.aab "${AAB}"
           cp build/app/outputs/flutter-apk/app-release.apk "${APK}"
           echo "aab=${AAB}" >> "${GITHUB_OUTPUT}"
@@ -199,7 +199,7 @@ jobs:
         if: needs.prepare.outputs.is_release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+        run: gh release upload "${GITHUB_REF_NAME}" "${{ steps.package.outputs.apk }}" --clobber
 
   ios:
     name: Build iOS
@@ -215,8 +215,8 @@ jobs:
       IOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
       IOS_APP_STORE_PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_APP_STORE_PROVISIONING_PROFILE_BASE64 }}
       KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-      IOS_DISTRIBUTION_METHOD: ${{ github.event.inputs.ios_distribution || 'ad-hoc' }}
-      UPLOAD_TESTFLIGHT: ${{ github.event.inputs.upload_testflight || 'false' }}
+      IOS_DISTRIBUTION_METHOD: ${{ github.event_name == 'push' && 'app-store-connect' || github.event.inputs.ios_distribution || 'ad-hoc' }}
+      UPLOAD_TESTFLIGHT: ${{ github.event_name == 'push' && 'true' || github.event.inputs.upload_testflight || 'false' }}
       APPSTORE_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
       APPSTORE_KEY_ID: ${{ secrets.APPSTORE_KEY_ID }}
       APPSTORE_PRIVATE_KEY: ${{ secrets.APPSTORE_PRIVATE_KEY }}
