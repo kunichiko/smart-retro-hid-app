@@ -1677,21 +1677,6 @@ class _LineInputBodyState extends State<_LineInputBody> {
     '\t': (0x10, false), // タブ
   };
 
-  /// 全角 ASCII (Ａ-Ｚ, ａ-ｚ, ０-９) と U+FF01-FF5E の記号を半角に正規化する。
-  /// 漢字や全角の日本語固有文字 (ひらがな等) はそのまま返し、_charToScancode 側で
-  /// マップ外として扱われる (= スキップ)。
-  static String _normalizeFullWidthAscii(String char) {
-    if (char.length != 1) return char;
-    final code = char.codeUnitAt(0);
-    // 全角スペース → 半角スペース
-    if (code == 0x3000) return ' ';
-    // U+FF01 (！) ～ U+FF5E (～) は ASCII の U+0021 ～ U+007E に -0xFEE0 で対応
-    if (code >= 0xFF01 && code <= 0xFF5E) {
-      return String.fromCharCode(code - 0xFEE0);
-    }
-    return char;
-  }
-
   /// 1 文字 → (scancode, SHIFT 要否)。マップ外なら null。
   static (int, bool)? _charToScancode(String char) {
     if (char.length != 1) return null;
@@ -1776,13 +1761,11 @@ class _LineInputBodyState extends State<_LineInputBody> {
       for (int i = 0; i < runes.length; i++) {
         final cp = runes[i];
         final raw = String.fromCharCode(cp);
-        final normalized = _normalizeFullWidthAscii(raw);
-        final asciiMapping = _charToScancode(normalized);
+        final asciiMapping = _charToScancode(raw);
         if (asciiMapping != null) {
           // ASCII 系: コード入力モードを抜けてから直接送る
           await ensureCodeMode(false);
           debugPrint('[LineInput]   send[$i] "$raw"'
-              '${normalized != raw ? ' (norm:"$normalized")' : ''}'
               ' → scancode=0x${asciiMapping.$1.toRadixString(16).padLeft(2, '0')}'
               ' shift=${asciiMapping.$2}');
           await _sendOneChar(asciiMapping.$1, asciiMapping.$2);
