@@ -14,6 +14,7 @@ import 'l10n/app_localizations.dart';
 import 'midi_service.dart';
 import 'mode_scaffold.dart';
 import 'orientation_helper.dart';
+import 'sjis_encoder.dart';
 
 // ===========================================================================
 // X68kKeyboardPage 本体
@@ -1734,6 +1735,7 @@ class _LineInputBodyState extends State<_LineInputBody> {
 
   // X68k スキャンコード定数
   static const int _scShift = 0x70;
+  static const int _scCodeInput = 0x5C;
   // 送信前に強制 release する修飾キー (SHIFT/CTRL/OPT.1/OPT.2/XF1-5)
   static const List<int> _modifiersToRelease = [
     0x70, 0x71, 0x72, 0x73, 0x55, 0x56, 0x57, 0x58, 0x59,
@@ -1750,39 +1752,69 @@ class _LineInputBodyState extends State<_LineInputBody> {
   Future<void> _send() async {
     final text = widget.controller.text;
     if (text.isEmpty || _sending) return;
+    final runes = text.runes.toList();
     setState(() {
       _sending = true;
-      _status = '送信中... 0/${text.length}';
+      _status = '送信中... 0/${runes.length}';
     });
     int sent = 0;
     int skipped = 0;
-    debugPrint('[LineInput] === send start: "$text" (${text.length} chars) ===');
+    // コード入力モードの状態を追跡 (toggle なので前回の状態を覚えておく)。
+    // _resetState が toggle 系をすべてオフにするので false スタートで OK。
+    bool inCodeMode = false;
+
+    Future<void> ensureCodeMode(bool desired) async {
+      if (inCodeMode == desired) return;
+      debugPrint(
+          '[LineInput] toggle code-input mode ${desired ? 'ON' : 'OFF'}');
+      await _sendOneChar(_scCodeInput, false);
+      inCodeMode = desired;
+      await Future.delayed(_interKeyDelay);
+    }
+
+    debugPrint('[LineInput] === send start: "$text" (${runes.length} codepoints) ===');
     try {
       await _resetState();
-      for (int i = 0; i < text.length; i++) {
-        final raw = text[i];
+      for (int i = 0; i < runes.length; i++) {
+        final cp = runes[i];
+        final raw = String.fromCharCode(cp);
         final normalized = _normalizeFullWidthAscii(raw);
-        final mapping = _charToScancode(normalized);
-        if (mapping == null) {
-          skipped++;
-          debugPrint('[LineInput]   skip[$i] "$raw"'
+        final asciiMapping = _charToScancode(normalized);
+        if (asciiMapping != null) {
+          // ASCII 系: コード入力モードを抜けてから直接送る
+          await ensureCodeMode(false);
+          debugPrint('[LineInput]   send[$i] "$raw"'
               '${normalized != raw ? ' (norm:"$normalized")' : ''}'
-              ' U+${raw.codeUnitAt(0).toRadixString(16).padLeft(4, '0').toUpperCase()}');
-          continue;
+              ' → scancode=0x${asciiMapping.$1.toRadixString(16).padLeft(2, '0')}'
+              ' shift=${asciiMapping.$2}');
+          await _sendOneChar(asciiMapping.$1, asciiMapping.$2);
+          sent++;
+        } else {
+          // SJIS にエンコードしてコード入力モードで送る
+          final sjis = SjisEncoder.encode(cp);
+          if (sjis != null) {
+            await ensureCodeMode(true);
+            debugPrint('[LineInput]   send[$i] "$raw"'
+                ' U+${cp.toRadixString(16).padLeft(4, '0').toUpperCase()}'
+                ' → SJIS=0x${sjis.toRadixString(16).padLeft(4, '0').toUpperCase()}');
+            await _sendSjisHex(sjis);
+            sent++;
+          } else {
+            debugPrint('[LineInput]   skip[$i] "$raw"'
+                ' U+${cp.toRadixString(16).padLeft(4, '0').toUpperCase()}'
+                ' (SJIS にマップなし)');
+            skipped++;
+          }
         }
-        debugPrint('[LineInput]   send[$i] "$raw"'
-            '${normalized != raw ? ' (norm:"$normalized")' : ''}'
-            ' → scancode=0x${mapping.$1.toRadixString(16).padLeft(2, '0')}'
-            ' shift=${mapping.$2}');
-        await _sendOneChar(mapping.$1, mapping.$2);
-        sent++;
         if ((i & 0x07) == 0 && mounted) {
           setState(() {
-            _status = '送信中... ${i + 1}/${text.length}';
+            _status = '送信中... ${i + 1}/${runes.length}';
           });
         }
         await Future.delayed(_interKeyDelay);
       }
+      // 最後にコード入力モードを抜けておく
+      await ensureCodeMode(false);
       debugPrint('[LineInput] === send done: sent=$sent skipped=$skipped ===');
       if (mounted) {
         setState(() {
@@ -1799,6 +1831,26 @@ class _LineInputBodyState extends State<_LineInputBody> {
         setState(() => _sending = false);
       }
     }
+  }
+
+  /// SJIS のコードを 4 桁 hex (16-bit 値 MSB から) として X68000 のキー入力で送る。
+  /// コード入力モードに入っている前提。
+  Future<void> _sendSjisHex(int sjisCode) async {
+    for (int shift = 12; shift >= 0; shift -= 4) {
+      final hex = (sjisCode >> shift) & 0x0F;
+      final scancode = _hexDigitToScancode(hex);
+      debugPrint('[LineInput]     hex ${hex.toRadixString(16).toUpperCase()}'
+          ' → scancode=0x${scancode.toRadixString(16)}');
+      await _sendOneChar(scancode, false);
+      await Future.delayed(_intraKeyDelay);
+    }
+  }
+
+  /// 0..F の hex 数字に対応する X68k スキャンコードを返す
+  /// (0-9 は数字行、A-F は A-F キー、いずれも SHIFT 不要)。
+  static int _hexDigitToScancode(int hex) {
+    if (hex < 10) return _digitScancodes[hex];
+    return _letterScancodes[hex - 10]; // A..F → letterScancodes[0..5]
   }
 
   /// 送信前に X68000 のキーボード状態をクリーンに戻す。
@@ -1889,9 +1941,11 @@ class _LineInputBodyState extends State<_LineInputBody> {
             const SizedBox(height: 16),
             const Text(
               '・大文字 (A-Z) と JIS 記号 (! " # 等) は SHIFT を自動付与して送信します。\n'
+              '・全角 ASCII (Ａ-Ｚ / ０-９ / 全角記号) は半角に正規化してから送ります。\n'
+              '・漢字 / かな / 半角カナ等は X68000 の「コード入力」モード経由で SJIS の\n'
+              '  16-bit code を 4 桁 hex で送信します (X68000 のキーボード LED に注目)。\n'
               '・送信前に CAPS / かな / ローマ字 / コード入力 / 全角 / ひらがな / INS が\n'
-              '  点灯していれば自動的にオフへ戻します (このモードに入ってから観測した範囲)。\n'
-              '・漢字など未対応の文字はスキップされます (本バージョン)。',
+              '  点灯していれば自動的にオフへ戻します (このモードに入ってから観測した範囲)。',
               style: TextStyle(color: Colors.grey, fontSize: 12),
             ),
           ],

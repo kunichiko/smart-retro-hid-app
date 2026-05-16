@@ -36,6 +36,10 @@ dependencies:
   cupertino_icons: ^1.0.8
   flutter_midi_command: ^0.5.4
   shared_preferences: ^2.3.0
+  # 漢字をライン入力モードで送るために Shift-JIS のテーブルを利用する。
+  # (charset の組み込み Encoder は実装にバグがあって Unicode→SJIS が壊れている
+  #  ため、内部の SJIS→UTF8 テーブルを逆引きして自前で reverse map を構築する)
+  charset: ^2.0.1
   flutter_localizations:
     sdk: flutter
   intl: any
