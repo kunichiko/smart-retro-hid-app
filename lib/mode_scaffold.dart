@@ -108,14 +108,16 @@ class _ModeScaffoldState extends State<ModeScaffold> {
 
   Widget _buildModeSelector() {
     if (widget.modes.length < 2) return const SizedBox.shrink();
+    // AppBar・ポップアップともに surface 系の背景なので、テキストとアイコンは
+    // onSurface 系で揃える (onPrimary だと dark テーマで暗い青になり潰れる)。
+    final colors = Theme.of(context).colorScheme;
     return DropdownButtonHideUnderline(
       child: DropdownButton<ChannelMode>(
         value: _current,
-        // AppBar は背景色がプライマリなので、メニューの背景も合わせる。
-        dropdownColor: Theme.of(context).colorScheme.surfaceContainerHigh,
-        iconEnabledColor: Theme.of(context).colorScheme.onPrimary,
+        dropdownColor: colors.surfaceContainerHigh,
+        iconEnabledColor: colors.onSurface,
         style: TextStyle(
-          color: Theme.of(context).colorScheme.onPrimary,
+          color: colors.onSurface,
           fontSize: 14,
         ),
         items: [
