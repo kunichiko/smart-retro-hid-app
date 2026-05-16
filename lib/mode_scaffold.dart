@@ -153,6 +153,13 @@ class _ModeScaffoldState extends State<ModeScaffold> {
         final settingsSheet = _current.buildSettings(context);
         return Scaffold(
           appBar: AppBar(
+            // 自動生成の戻るボタンにフォーカスが移って Enter で誤 activate
+            // される事故 (macOS の Cocoa Ctrl+M = Enter 経由など) を防ぐため、
+            // ExcludeFocus でフォーカスチェーンから外す。マウスクリックは
+            // フォーカス不要なので「戻る」機能は維持される。
+            leading: Navigator.of(context).canPop()
+                ? const ExcludeFocus(child: BackButton())
+                : null,
             title: Row(
               mainAxisSize: MainAxisSize.min,
               children: [

@@ -51,6 +51,7 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
         channel: widget.channel,
         mouseChannel: widget.mouseChannel,
       ),
+      LineInputMode(channel: widget.channel),
     ];
   }
 
@@ -64,30 +65,11 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
 
   @override
   Widget build(BuildContext context) {
-    // 物理キー入力は HardwareKeyboard.addHandler 経由で MIDI へ転送するので、
-    // Flutter widget tree でのキー処理は不要。以下の Focus でページ全体の
-    // キー処理を完全にブロックする:
-    //   - autofocus: true            → このノードが mount 時に focus を取り、
-    //                                  AppBar の戻るボタン等にフォーカスが
-    //                                  落ちないようにする
-    //   - descendantsAreFocusable: false → 配下の widget は一切 focus 不可。
-    //                                  Tab / Arrow キーで focus を奪われないし、
-    //                                  Enter での activate も発生しない
-    //   - onKeyEvent: handled       → ここに飛んできたキーイベントは全消費
-    //
-    // Cocoa の text editing bindings が Ctrl+N → Arrow Down、Ctrl+M → Enter と
-    // 変換するため、これらが Flutter の DirectionalFocusIntent / ActivateIntent
-    // を発火させて戻るボタンを activate → maybePop してしまう症状の対策。
-    // マウスクリックは focus に依存しないので、AppBar 操作は従来通り可能。
-    return Focus(
-      autofocus: true,
-      descendantsAreFocusable: false,
-      onKeyEvent: (node, event) => KeyEventResult.handled,
-      child: ModeScaffold(
-        title: AppLocalizations.of(context)!.x68kKeyboardTitle,
-        midi: widget.midi,
-        modes: _modes,
-      ),
+    return ModeScaffold(
+      title: AppLocalizations.of(context)!.x68kKeyboardTitle,
+      midi: widget.midi,
+      modes: _modes,
+      persistenceKey: 'x68k_keyboard.selectedMode',
     );
   }
 }
@@ -116,8 +98,7 @@ class StandardX68kMode extends ChannelMode {
   String get id => 'x68k_keyboard.standard';
 
   @override
-  String label(BuildContext context) =>
-      AppLocalizations.of(context)!.x68kKeyboardTitle;
+  String label(BuildContext context) => '標準';
 
   void _toggleNumpad() {
     _numpadVisible = !_numpadVisible;
@@ -131,13 +112,26 @@ class StandardX68kMode extends ChannelMode {
 
   @override
   Widget buildBody(BuildContext context, MidiService midi) {
-    return _X68kKeyboardBody(
-      midi: midi,
-      channel: channel,
-      mouseChannel: mouseChannel,
-      numpadVisible: _numpadVisible,
-      trackpadVisible: _trackpadVisible,
-      stickyController: stickyController,
+    // body の subtree 内では Flutter のフォーカス系キー処理を完全に遮断する。
+    // 物理キー入力は body 内 (_X68kKeyboardBody) が HardwareKeyboard.addHandler
+    // 経由で MIDI に転送するため、widget tree のキー処理は不要。
+    //   - autofocus: true            → mount 時に focus を取り、body 内の
+    //                                  Focusable widget に focus が落ちないように
+    //   - descendantsAreFocusable: false → 配下を一切 focus 不可
+    //   - onKeyEvent: handled       → 来たキーイベントを全消費
+    // AppBar 側の戻るボタンは ModeScaffold 側で ExcludeFocus 済み。
+    return Focus(
+      autofocus: true,
+      descendantsAreFocusable: false,
+      onKeyEvent: (node, event) => KeyEventResult.handled,
+      child: _X68kKeyboardBody(
+        midi: midi,
+        channel: channel,
+        mouseChannel: mouseChannel,
+        numpadVisible: _numpadVisible,
+        trackpadVisible: _trackpadVisible,
+        stickyController: stickyController,
+      ),
     );
   }
 
@@ -1536,6 +1530,339 @@ class _TrackpadSurfaceState extends State<_TrackpadSurface> {
               letterSpacing: 4,
             ),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+// ===========================================================================
+// LineInputMode — 1 行のテキストフィールドにまとめて入力し、Enter / 送信
+// ボタンで文字列を X68000 にタイプする入力モード。
+//
+// 文字 → スキャンコード変換は JIS 配列基準。大文字 (A-Z) や JIS の Shift 記号
+// (! " # 等) は SHIFT 修飾を自動付与する。
+// 送信前に LED トグル系 (かな/CAPS/ローマ字/コード入力/ひらがな/全角/INS) を
+// 観測中の状態に基づいてオフに戻し、押下中の可能性がある修飾キーを強制 release
+// する。これでクリーンな状態から打ち始める。
+// 漢字等の未対応文字は現バージョンではスキップ (送信完了時に件数を表示)。
+// ===========================================================================
+
+class LineInputMode extends ChannelMode {
+  final int channel;
+  final TextEditingController _controller = TextEditingController();
+
+  /// X68000 から届く LED 制御コマンドで更新される LED 状態。送信前リセット用。
+  /// 本モードがアクティブな間だけ track する (StandardX68kMode と独立)。
+  final Set<int> _ledOn = <int>{};
+  void Function(int midiChannel, int byte)? _prevTargetRxHandler;
+
+  LineInputMode({required this.channel});
+
+  // LED bit (0..6) → 対応スキャンコード。StandardX68kMode と同じ並び。
+  static const List<int> _ledBitToScancode = [
+    0x5A, // bit0 かな
+    0x5B, // bit1 ローマ字
+    0x5C, // bit2 コード入力
+    0x5D, // bit3 CAPS
+    0x5E, // bit4 INS
+    0x5F, // bit5 ひらがな
+    0x60, // bit6 全角
+  ];
+
+  @override
+  String get id => 'x68k_keyboard.lineInput';
+
+  @override
+  String label(BuildContext context) => 'ライン入力';
+
+  @override
+  Future<void> onEnter(MidiService midi) async {
+    _prevTargetRxHandler = midi.onTargetRx;
+    midi.onTargetRx = _onTargetRx;
+  }
+
+  @override
+  Future<void> onExit(MidiService midi) async {
+    midi.onTargetRx = _prevTargetRxHandler;
+    _prevTargetRxHandler = null;
+  }
+
+  void _onTargetRx(int midiChannel, int byte) {
+    if (midiChannel != channel) return;
+    if ((byte & 0x80) != 0) {
+      // LED 制御: bit7=1, bit6..0 が各 LED 状態 (X68k は 0=点灯, 1=消灯)
+      for (int i = 0; i < _ledBitToScancode.length; i++) {
+        final lit = ((byte >> i) & 1) == 0;
+        final sc = _ledBitToScancode[i];
+        if (lit) {
+          _ledOn.add(sc);
+        } else {
+          _ledOn.remove(sc);
+        }
+      }
+    }
+    // repeat delay / interval / brightness は LineInputMode では使わないので無視。
+  }
+
+  @override
+  Widget buildBody(BuildContext context, MidiService midi) {
+    return _LineInputBody(
+      midi: midi,
+      channel: channel,
+      controller: _controller,
+      ledOnSnapshot: () => Set<int>.unmodifiable(_ledOn),
+    );
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+}
+
+class _LineInputBody extends StatefulWidget {
+  final MidiService midi;
+  final int channel;
+  final TextEditingController controller;
+  final Set<int> Function() ledOnSnapshot;
+
+  const _LineInputBody({
+    required this.midi,
+    required this.channel,
+    required this.controller,
+    required this.ledOnSnapshot,
+  });
+
+  @override
+  State<_LineInputBody> createState() => _LineInputBodyState();
+}
+
+class _LineInputBodyState extends State<_LineInputBody> {
+  bool _sending = false;
+  String _status = '';
+
+  // a-z (logical) を X68k スキャンコード A-Z の順で並べたもの。
+  static const List<int> _letterScancodes = [
+    0x1E, 0x2E, 0x2C, 0x20, 0x13, 0x21, 0x22, 0x23, // A B C D E F G H
+    0x18, 0x24, 0x25, 0x26, 0x30, 0x2F, 0x19, 0x1A, // I J K L M N O P
+    0x11, 0x14, 0x1F, 0x15, 0x17, 0x2D, 0x12, 0x2B, // Q R S T U V W X
+    0x16, 0x2A, //                                    Y Z
+  ];
+  // 0-9 → 各スキャンコード
+  static const List<int> _digitScancodes = [
+    0x0B, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A,
+  ];
+  // それ以外の記号類。値は (scancode, 要 SHIFT) の record。
+  static const Map<String, (int, bool)> _symbolMap = {
+    // SHIFT 不要 (JIS 素押し)
+    ' ': (0x35, false),
+    '-': (0x0C, false),
+    '^': (0x0D, false),
+    '¥': (0x0E, false),
+    '\\': (0x0E, false), // US の \ も JIS の ¥ に割り当て
+    '@': (0x1B, false),
+    '[': (0x1C, false),
+    ';': (0x27, false),
+    ':': (0x28, false),
+    ']': (0x29, false),
+    ',': (0x31, false),
+    '.': (0x32, false),
+    '/': (0x33, false),
+    // SHIFT + その他キーで出る JIS 記号
+    '!': (0x02, true),
+    '"': (0x03, true),
+    '#': (0x04, true),
+    '\$': (0x05, true),
+    '%': (0x06, true),
+    '&': (0x07, true),
+    "'": (0x08, true),
+    '(': (0x09, true),
+    ')': (0x0A, true),
+    '=': (0x0C, true),
+    '~': (0x0D, true),
+    '|': (0x0E, true),
+    '`': (0x1B, true),
+    '{': (0x1C, true),
+    '+': (0x27, true),
+    '*': (0x28, true),
+    '}': (0x29, true),
+    '<': (0x31, true),
+    '>': (0x32, true),
+    '?': (0x33, true),
+    '_': (0x34, true),
+    // 制御文字
+    '\n': (0x1D, false), // 改行 → RETURN
+    '\t': (0x10, false), // タブ
+  };
+
+  /// 1 文字 → (scancode, SHIFT 要否)。マップ外なら null。
+  static (int, bool)? _charToScancode(String char) {
+    if (char.length != 1) return null;
+    final code = char.codeUnitAt(0);
+    // a-z
+    if (code >= 0x61 && code <= 0x7A) {
+      return (_letterScancodes[code - 0x61], false);
+    }
+    // A-Z
+    if (code >= 0x41 && code <= 0x5A) {
+      return (_letterScancodes[code - 0x41], true);
+    }
+    // 0-9
+    if (code >= 0x30 && code <= 0x39) {
+      return (_digitScancodes[code - 0x30], false);
+    }
+    return _symbolMap[char];
+  }
+
+  // X68k スキャンコード定数
+  static const int _scShift = 0x70;
+  // 送信前に強制 release する修飾キー (SHIFT/CTRL/OPT.1/OPT.2/XF1-5)
+  static const List<int> _modifiersToRelease = [
+    0x70, 0x71, 0x72, 0x73, 0x55, 0x56, 0x57, 0x58, 0x59,
+  ];
+  // 観測した LED のうち点灯中ならトグル押下でオフに戻す対象スキャンコード
+  static const List<int> _toggleKeysToClear = [
+    0x5A, 0x5B, 0x5C, 0x5D, 0x5E, 0x5F, 0x60,
+  ];
+
+  // タイミング
+  static const Duration _intraKeyDelay = Duration(milliseconds: 15);
+  static const Duration _interKeyDelay = Duration(milliseconds: 25);
+
+  Future<void> _send() async {
+    final text = widget.controller.text;
+    if (text.isEmpty || _sending) return;
+    setState(() {
+      _sending = true;
+      _status = '送信中... 0/${text.length}';
+    });
+    int sent = 0;
+    int skipped = 0;
+    try {
+      await _resetState();
+      for (int i = 0; i < text.length; i++) {
+        final mapping = _charToScancode(text[i]);
+        if (mapping == null) {
+          skipped++;
+          continue;
+        }
+        await _sendOneChar(mapping.$1, mapping.$2);
+        sent++;
+        if ((i & 0x07) == 0 && mounted) {
+          setState(() {
+            _status = '送信中... ${i + 1}/${text.length}';
+          });
+        }
+        await Future.delayed(_interKeyDelay);
+      }
+      if (mounted) {
+        setState(() {
+          _status = '完了 (送信 $sent 文字, スキップ $skipped 文字)';
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _status = 'エラー: $e');
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _sending = false);
+      }
+    }
+  }
+
+  /// 送信前に X68000 のキーボード状態をクリーンに戻す。
+  Future<void> _resetState() async {
+    // 押下中の可能性がある修飾キーを強制 release (no-op の場合も含めて安全)。
+    for (final code in _modifiersToRelease) {
+      widget.midi.sendNoteOff(widget.channel, code);
+    }
+    await Future.delayed(_intraKeyDelay);
+
+    // 観測中の LED が点灯している toggle key を押してオフに戻す。
+    final leds = widget.ledOnSnapshot();
+    for (final code in _toggleKeysToClear) {
+      if (leds.contains(code)) {
+        widget.midi.sendNoteOn(widget.channel, code, 127);
+        await Future.delayed(_intraKeyDelay);
+        widget.midi.sendNoteOff(widget.channel, code);
+        await Future.delayed(_interKeyDelay);
+      }
+    }
+  }
+
+  Future<void> _sendOneChar(int scancode, bool needShift) async {
+    final ch = widget.channel;
+    if (needShift) {
+      widget.midi.sendNoteOn(ch, _scShift, 127);
+      await Future.delayed(_intraKeyDelay);
+    }
+    widget.midi.sendNoteOn(ch, scancode, 127);
+    await Future.delayed(_intraKeyDelay);
+    widget.midi.sendNoteOff(ch, scancode);
+    if (needShift) {
+      await Future.delayed(_intraKeyDelay);
+      widget.midi.sendNoteOff(ch, _scShift);
+    }
+  }
+
+  void _clear() {
+    widget.controller.clear();
+    setState(() => _status = '');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            TextField(
+              controller: widget.controller,
+              autofocus: true,
+              enabled: !_sending,
+              decoration: const InputDecoration(
+                hintText: 'X68000 に送る文字列 (Enter または送信ボタン)',
+                border: OutlineInputBorder(),
+              ),
+              onSubmitted: (_) => _send(),
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                FilledButton.icon(
+                  onPressed: _sending ? null : _send,
+                  icon: const Icon(Icons.send),
+                  label: const Text('送信'),
+                ),
+                const SizedBox(width: 8),
+                OutlinedButton.icon(
+                  onPressed: _sending ? null : _clear,
+                  icon: const Icon(Icons.clear),
+                  label: const Text('クリア'),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Text(
+                    _status,
+                    style: const TextStyle(color: Colors.grey, fontSize: 12),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            const Text(
+              '・大文字 (A-Z) と JIS 記号 (! " # 等) は SHIFT を自動付与して送信します。\n'
+              '・送信前に CAPS / かな / ローマ字 / コード入力 / 全角 / ひらがな / INS が\n'
+              '  点灯していれば自動的にオフへ戻します (このモードに入ってから観測した範囲)。\n'
+              '・漢字など未対応の文字はスキップされます (本バージョン)。',
+              style: TextStyle(color: Colors.grey, fontSize: 12),
+            ),
+          ],
         ),
       ),
     );
