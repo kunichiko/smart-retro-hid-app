@@ -350,6 +350,10 @@ class _X68kKeyboardBodyState extends State<_X68kKeyboardBody> {
     widget.stickyController.onReleaseAllRequested = _releaseAllStuck;
     // sticky 状態が変わったらキー描画を更新する。
     widget.stickyController.addListener(_onStickyChanged);
+
+    // デスクトップ / 外付け物理キーボードからのキーイベントを購読する。
+    // Focus を介さない全域ハンドラなので AppBar 操作中でもキーが拾える。
+    HardwareKeyboard.instance.addHandler(_handlePhysicalKey);
   }
 
   void _onStickyChanged() {
@@ -373,6 +377,7 @@ class _X68kKeyboardBodyState extends State<_X68kKeyboardBody> {
     _releaseAllStuck();
     widget.stickyController.removeListener(_onStickyChanged);
     widget.stickyController.onReleaseAllRequested = null;
+    HardwareKeyboard.instance.removeHandler(_handlePhysicalKey);
     super.dispose();
   }
 
@@ -443,6 +448,117 @@ class _X68kKeyboardBodyState extends State<_X68kKeyboardBody> {
       _unstickKey(code);
     } else {
       _stickKey(code);
+    }
+  }
+
+  // ===========================================================================
+  // 物理キーボード直接入力
+  // ===========================================================================
+  //
+  // LogicalKeyboardKey → X68000 スキャンコード のマッピング。
+  // 基本的に JIS 配列前提でレイアウトしてある (X68000 自体が JIS)。
+  // 記号系の一部は US 配列だと別の物理キー位置になるが、X68k のレイアウトを
+  // 真とする方針なので「ホストで打った文字 = X68k 側のキー」と捉えて欲しい。
+  static final Map<LogicalKeyboardKey, int> _physicalKeyMap = {
+    // 文字キー
+    LogicalKeyboardKey.keyA: 0x1E, LogicalKeyboardKey.keyB: 0x2E,
+    LogicalKeyboardKey.keyC: 0x2C, LogicalKeyboardKey.keyD: 0x20,
+    LogicalKeyboardKey.keyE: 0x13, LogicalKeyboardKey.keyF: 0x21,
+    LogicalKeyboardKey.keyG: 0x22, LogicalKeyboardKey.keyH: 0x23,
+    LogicalKeyboardKey.keyI: 0x18, LogicalKeyboardKey.keyJ: 0x24,
+    LogicalKeyboardKey.keyK: 0x25, LogicalKeyboardKey.keyL: 0x26,
+    LogicalKeyboardKey.keyM: 0x30, LogicalKeyboardKey.keyN: 0x2F,
+    LogicalKeyboardKey.keyO: 0x19, LogicalKeyboardKey.keyP: 0x1A,
+    LogicalKeyboardKey.keyQ: 0x11, LogicalKeyboardKey.keyR: 0x14,
+    LogicalKeyboardKey.keyS: 0x1F, LogicalKeyboardKey.keyT: 0x15,
+    LogicalKeyboardKey.keyU: 0x17, LogicalKeyboardKey.keyV: 0x2D,
+    LogicalKeyboardKey.keyW: 0x12, LogicalKeyboardKey.keyX: 0x2B,
+    LogicalKeyboardKey.keyY: 0x16, LogicalKeyboardKey.keyZ: 0x2A,
+    // 数字キー
+    LogicalKeyboardKey.digit1: 0x02, LogicalKeyboardKey.digit2: 0x03,
+    LogicalKeyboardKey.digit3: 0x04, LogicalKeyboardKey.digit4: 0x05,
+    LogicalKeyboardKey.digit5: 0x06, LogicalKeyboardKey.digit6: 0x07,
+    LogicalKeyboardKey.digit7: 0x08, LogicalKeyboardKey.digit8: 0x09,
+    LogicalKeyboardKey.digit9: 0x0A, LogicalKeyboardKey.digit0: 0x0B,
+    // 制御キー
+    LogicalKeyboardKey.escape: 0x01,
+    LogicalKeyboardKey.backspace: 0x0F,
+    LogicalKeyboardKey.tab: 0x10,
+    LogicalKeyboardKey.enter: 0x1D,
+    LogicalKeyboardKey.space: 0x35,
+    // 矢印
+    LogicalKeyboardKey.arrowUp: 0x3C,
+    LogicalKeyboardKey.arrowDown: 0x3E,
+    LogicalKeyboardKey.arrowLeft: 0x3B,
+    LogicalKeyboardKey.arrowRight: 0x3D,
+    // モディファイア (左右どちらも同じ X68k キーに割り当て)
+    LogicalKeyboardKey.shiftLeft: 0x70,
+    LogicalKeyboardKey.shiftRight: 0x70,
+    LogicalKeyboardKey.controlLeft: 0x71,
+    LogicalKeyboardKey.controlRight: 0x71,
+    LogicalKeyboardKey.altLeft: 0x72,  // OPT.1
+    LogicalKeyboardKey.altRight: 0x73, // OPT.2
+    // ファンクションキー
+    LogicalKeyboardKey.f1: 0x63, LogicalKeyboardKey.f2: 0x64,
+    LogicalKeyboardKey.f3: 0x65, LogicalKeyboardKey.f4: 0x66,
+    LogicalKeyboardKey.f5: 0x67, LogicalKeyboardKey.f6: 0x68,
+    LogicalKeyboardKey.f7: 0x69, LogicalKeyboardKey.f8: 0x6A,
+    LogicalKeyboardKey.f9: 0x6B, LogicalKeyboardKey.f10: 0x6C,
+    // 編集 / ナビゲーション
+    LogicalKeyboardKey.home: 0x36,
+    LogicalKeyboardKey.delete: 0x37,
+    LogicalKeyboardKey.insert: 0x5E,
+    LogicalKeyboardKey.pageUp: 0x38,    // ROLL UP
+    LogicalKeyboardKey.pageDown: 0x39,  // ROLL DOWN
+    LogicalKeyboardKey.capsLock: 0x5D,
+    // 記号 (代表的なものだけ。配列差異がある記号は要望次第で追加)
+    LogicalKeyboardKey.minus: 0x0C,
+    LogicalKeyboardKey.comma: 0x31,
+    LogicalKeyboardKey.period: 0x32,
+    LogicalKeyboardKey.slash: 0x33,
+    LogicalKeyboardKey.semicolon: 0x27,
+  };
+
+  /// HardwareKeyboard コールバック。マップにあるキーだけハンドルし、それ以外は
+  /// false を返して他のリスナ (OS ショートカット等) に処理を委譲する。
+  bool _handlePhysicalKey(KeyEvent event) {
+    // OS のオートリピートは無視 (ファーム側がリピートを管理しているので)
+    if (event is KeyRepeatEvent) return false;
+    final scancode = _physicalKeyMap[event.logicalKey];
+    if (scancode == null) return false;
+
+    if (event is KeyDownEvent) {
+      _physicalKeyDown(scancode);
+      return true;
+    }
+    if (event is KeyUpEvent) {
+      _physicalKeyUp(scancode);
+      return true;
+    }
+    return false;
+  }
+
+  void _physicalKeyDown(int code) {
+    // 既に押されている (sticky 等) なら二重 NoteOn を避ける
+    if (_pressed.contains(code)) return;
+    _pressed.add(code);
+    widget.midi.sendNoteOn(widget.channel, code, 127);
+    if (!_noRepeatScancodes.contains(code)) {
+      _scheduleRepeat(code);
+    }
+    if (mounted) setState(() {});
+  }
+
+  void _physicalKeyUp(int code) {
+    // sticky 中は物理キーの release で解除しない (画面上の sticky を尊重)
+    if (widget.stickyController.isStuck(code)) return;
+    if (_pressed.remove(code)) {
+      if (_repeatScancode == code) {
+        _repeatTimer?.cancel();
+        _repeatScancode = null;
+      }
+      widget.midi.sendNoteOff(widget.channel, code);
+      if (mounted) setState(() {});
     }
   }
 
