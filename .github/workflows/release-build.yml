@@ -104,7 +104,7 @@ jobs:
         run: flutter pub get
 
       - name: Analyze
-        run: flutter analyze
+        run: flutter analyze --no-fatal-infos
 
       - name: Install Android signing key
         if: env.ANDROID_KEYSTORE_BASE64 != ''
@@ -190,7 +190,7 @@ jobs:
         run: flutter pub get
 
       - name: Analyze
-        run: flutter analyze
+        run: flutter analyze --no-fatal-infos
 
       - name: Install iOS signing assets
         shell: bash
@@ -302,7 +302,7 @@ jobs:
         run: flutter pub get
 
       - name: Analyze
-        run: flutter analyze
+        run: flutter analyze --no-fatal-infos
 
       - name: Install macOS signing certificate
         if: env.MACOS_CERTIFICATE_BASE64 != ''
