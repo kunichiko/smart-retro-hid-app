@@ -350,14 +350,11 @@ class _X68kKeyboardBodyState extends State<_X68kKeyboardBody> {
   // ポップアップで使う基本ユニットサイズ (LayoutBuilder で更新)
   double _h = 0;
 
-  // 元のハンドラを保持して dispose で復元
-  void Function(int, int)? _prevTargetRxHandler;
-
   @override
   void initState() {
     super.initState();
     // 横向き固定は外側の X68kKeyboardPage で済ませてある。
-    _prevTargetRxHandler = widget.midi.onTargetRx;
+    // onTargetRx は冪等パターンで設定する (chain による stale reference を防ぐ)。
     widget.midi.onTargetRx = _handleTargetRx;
 
     // AppBar の "全解除" ボタンから呼ばれるコールバックを登録。
@@ -386,7 +383,10 @@ class _X68kKeyboardBodyState extends State<_X68kKeyboardBody> {
       entry.remove();
     }
     _popupOverlays.clear();
-    widget.midi.onTargetRx = _prevTargetRxHandler;
+    // 自分が現在の onTargetRx ならクリア。別モードが既に設定済みなら触らない。
+    if (widget.midi.onTargetRx == _handleTargetRx) {
+      widget.midi.onTargetRx = null;
+    }
     // 退場時に sticky で残っている分を全て NoteOff してから controller を切る。
     _releaseAllStuck();
     widget.stickyController.removeListener(_onStickyChanged);
@@ -1555,7 +1555,6 @@ class LineInputMode extends ChannelMode {
   /// X68000 から届く LED 制御コマンドで更新される LED 状態。送信前リセット用。
   /// 本モードがアクティブな間だけ track する (StandardX68kMode と独立)。
   final Set<int> _ledOn = <int>{};
-  void Function(int midiChannel, int byte)? _prevTargetRxHandler;
 
   LineInputMode({required this.channel});
 
@@ -1578,14 +1577,16 @@ class LineInputMode extends ChannelMode {
 
   @override
   Future<void> onEnter(MidiService midi) async {
-    _prevTargetRxHandler = midi.onTargetRx;
+    // 冪等パターンで onTargetRx を設定 (chain による stale reference を防ぐ)。
     midi.onTargetRx = _onTargetRx;
   }
 
   @override
   Future<void> onExit(MidiService midi) async {
-    midi.onTargetRx = _prevTargetRxHandler;
-    _prevTargetRxHandler = null;
+    // 自分が現在の onTargetRx ならクリア。別モードが既に設定済みなら触らない。
+    if (midi.onTargetRx == _onTargetRx) {
+      midi.onTargetRx = null;
+    }
   }
 
   void _onTargetRx(int midiChannel, int byte) {
@@ -1697,6 +1698,21 @@ class _LineInputBodyState extends State<_LineInputBody> {
     '\t': (0x10, false), // タブ
   };
 
+  /// 全角 ASCII (Ａ-Ｚ, ａ-ｚ, ０-９) と U+FF01-FF5E の記号を半角に正規化する。
+  /// 漢字や全角の日本語固有文字 (ひらがな等) はそのまま返し、_charToScancode 側で
+  /// マップ外として扱われる (= スキップ)。
+  static String _normalizeFullWidthAscii(String char) {
+    if (char.length != 1) return char;
+    final code = char.codeUnitAt(0);
+    // 全角スペース → 半角スペース
+    if (code == 0x3000) return ' ';
+    // U+FF01 (！) ～ U+FF5E (～) は ASCII の U+0021 ～ U+007E に -0xFEE0 で対応
+    if (code >= 0xFF01 && code <= 0xFF5E) {
+      return String.fromCharCode(code - 0xFEE0);
+    }
+    return char;
+  }
+
   /// 1 文字 → (scancode, SHIFT 要否)。マップ外なら null。
   static (int, bool)? _charToScancode(String char) {
     if (char.length != 1) return null;
@@ -1740,14 +1756,24 @@ class _LineInputBodyState extends State<_LineInputBody> {
     });
     int sent = 0;
     int skipped = 0;
+    debugPrint('[LineInput] === send start: "$text" (${text.length} chars) ===');
     try {
       await _resetState();
       for (int i = 0; i < text.length; i++) {
-        final mapping = _charToScancode(text[i]);
+        final raw = text[i];
+        final normalized = _normalizeFullWidthAscii(raw);
+        final mapping = _charToScancode(normalized);
         if (mapping == null) {
           skipped++;
+          debugPrint('[LineInput]   skip[$i] "$raw"'
+              '${normalized != raw ? ' (norm:"$normalized")' : ''}'
+              ' U+${raw.codeUnitAt(0).toRadixString(16).padLeft(4, '0').toUpperCase()}');
           continue;
         }
+        debugPrint('[LineInput]   send[$i] "$raw"'
+            '${normalized != raw ? ' (norm:"$normalized")' : ''}'
+            ' → scancode=0x${mapping.$1.toRadixString(16).padLeft(2, '0')}'
+            ' shift=${mapping.$2}');
         await _sendOneChar(mapping.$1, mapping.$2);
         sent++;
         if ((i & 0x07) == 0 && mounted) {
@@ -1757,12 +1783,14 @@ class _LineInputBodyState extends State<_LineInputBody> {
         }
         await Future.delayed(_interKeyDelay);
       }
+      debugPrint('[LineInput] === send done: sent=$sent skipped=$skipped ===');
       if (mounted) {
         setState(() {
           _status = '完了 (送信 $sent 文字, スキップ $skipped 文字)';
         });
       }
     } catch (e) {
+      debugPrint('[LineInput] !! error during send: $e');
       if (mounted) {
         setState(() => _status = 'エラー: $e');
       }
@@ -1775,6 +1803,7 @@ class _LineInputBodyState extends State<_LineInputBody> {
 
   /// 送信前に X68000 のキーボード状態をクリーンに戻す。
   Future<void> _resetState() async {
+    debugPrint('[LineInput] reset: release modifiers');
     // 押下中の可能性がある修飾キーを強制 release (no-op の場合も含めて安全)。
     for (final code in _modifiersToRelease) {
       widget.midi.sendNoteOff(widget.channel, code);
@@ -1783,8 +1812,11 @@ class _LineInputBodyState extends State<_LineInputBody> {
 
     // 観測中の LED が点灯している toggle key を押してオフに戻す。
     final leds = widget.ledOnSnapshot();
+    debugPrint('[LineInput] reset: ledOn snapshot = '
+        '${leds.map((c) => '0x${c.toRadixString(16)}').join(',')}');
     for (final code in _toggleKeysToClear) {
       if (leds.contains(code)) {
+        debugPrint('[LineInput] reset: toggle off 0x${code.toRadixString(16)}');
         widget.midi.sendNoteOn(widget.channel, code, 127);
         await Future.delayed(_intraKeyDelay);
         widget.midi.sendNoteOff(widget.channel, code);
