@@ -56,6 +56,7 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
 
   @override
   void dispose() {
+    debugPrint('[X68kKeyboardPage] state dispose');
     for (final m in _modes) {
       m.dispose();
     }
@@ -64,10 +65,19 @@ class _X68kKeyboardPageState extends State<X68kKeyboardPage> {
 
   @override
   Widget build(BuildContext context) {
-    return ModeScaffold(
-      title: AppLocalizations.of(context)!.x68kKeyboardTitle,
-      midi: widget.midi,
-      modes: _modes,
+    // === デバッグ用: 連続入力中に page が pop される原因を追うため、pop 発生時に
+    // スタックトレースを出力する。原因特定後に削除予定。
+    return PopScope(
+      canPop: true,
+      onPopInvokedWithResult: (didPop, result) {
+        debugPrint('[X68kKeyboardPage] PopScope onPopInvoked: didPop=$didPop result=$result');
+        debugPrint(StackTrace.current.toString());
+      },
+      child: ModeScaffold(
+        title: AppLocalizations.of(context)!.x68kKeyboardTitle,
+        midi: widget.midi,
+        modes: _modes,
+      ),
     );
   }
 }
@@ -362,6 +372,7 @@ class _X68kKeyboardBodyState extends State<_X68kKeyboardBody> {
 
   @override
   void dispose() {
+    debugPrint('[X68kKeyboardBody] state dispose, _pressed=$_pressed');
     _repeatTimer?.cancel();
     _popupShowTimer?.cancel();
     for (final t in _popupHideTimers.values) {
