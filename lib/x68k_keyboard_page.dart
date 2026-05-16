@@ -1540,6 +1540,9 @@ class LineInputMode extends ChannelMode {
   final int channel;
   final X68kKeyboardSharedState shared;
   final TextEditingController _controller = TextEditingController();
+  // 送信履歴。モードを切り替えても消えないように body 側でなく mode 側に持つ。
+  final List<String> _history = [];
+  static const int _maxHistory = 50;
 
   LineInputMode({required this.channel, required this.shared});
 
@@ -1556,6 +1559,8 @@ class LineInputMode extends ChannelMode {
       channel: channel,
       controller: _controller,
       shared: shared,
+      history: _history,
+      maxHistory: _maxHistory,
     );
   }
 
@@ -1571,12 +1576,16 @@ class _LineInputBody extends StatefulWidget {
   final int channel;
   final TextEditingController controller;
   final X68kKeyboardSharedState shared;
+  final List<String> history;
+  final int maxHistory;
 
   const _LineInputBody({
     required this.midi,
     required this.channel,
     required this.controller,
     required this.shared,
+    required this.history,
+    required this.maxHistory,
   });
 
   @override
@@ -1584,8 +1593,31 @@ class _LineInputBody extends StatefulWidget {
 }
 
 class _LineInputBodyState extends State<_LineInputBody> {
+  final FocusNode _focusNode = FocusNode();
   bool _sending = false;
   String _status = '';
+
+  @override
+  void dispose() {
+    _focusNode.dispose();
+    super.dispose();
+  }
+
+  // 機能キー (BS / DEL / TAB / ESC / INS / HOME / CLR / カーソル) の定義。
+  // 各ボタンは押下で 1 回だけ NoteOn/Off ペアを送る。
+  static const List<({String label, int scancode})> _functionKeys = [
+    (label: 'ESC', scancode: 0x01),
+    (label: 'TAB', scancode: 0x10),
+    (label: 'BS', scancode: 0x0F),
+    (label: 'DEL', scancode: 0x37),
+    (label: 'INS', scancode: 0x5E),
+    (label: 'HOME', scancode: 0x36),
+    (label: 'CLR', scancode: 0x3F),
+    (label: '←', scancode: 0x3B),
+    (label: '↓', scancode: 0x3E),
+    (label: '↑', scancode: 0x3C),
+    (label: '→', scancode: 0x3D),
+  ];
 
   // a-z (logical) を X68k スキャンコード A-Z の順で並べたもの。
   static const List<int> _letterScancodes = [
@@ -1692,8 +1724,28 @@ class _LineInputBodyState extends State<_LineInputBody> {
   static const Duration _interKeyDelay = Duration(milliseconds: 25);
 
   Future<void> _send() async {
+    if (_sending) return;
     final text = widget.controller.text;
-    if (text.isEmpty || _sending) return;
+    if (text.isEmpty) {
+      // 空行 + Enter は X68000 に RETURN (改行) を 1 回送る。
+      // 履歴には追加しない (空文字を履歴に残しても意味がないため)。
+      setState(() {
+        _sending = true;
+        _status = '改行送信中...';
+      });
+      debugPrint('[LineInput] === send empty (RETURN only) ===');
+      try {
+        await _resetState();
+        await _sendOneChar(0x1D, false); // X68k RETURN
+        if (mounted) setState(() => _status = '改行を送信');
+      } catch (e) {
+        if (mounted) setState(() => _status = 'エラー: $e');
+      } finally {
+        if (mounted) setState(() => _sending = false);
+        _focusNode.requestFocus();
+      }
+      return;
+    }
     final runes = text.runes.toList();
     setState(() {
       _sending = true;
@@ -1761,6 +1813,13 @@ class _LineInputBodyState extends State<_LineInputBody> {
       if (mounted) {
         setState(() {
           _status = '完了 (送信 $sent 文字, スキップ $skipped 文字)';
+          // 履歴に追加 (重複は先頭に移動)。空送信は来ないのでチェック不要。
+          widget.history.remove(text);
+          widget.history.insert(0, text);
+          if (widget.history.length > widget.maxHistory) {
+            widget.history.removeLast();
+          }
+          widget.controller.clear();
         });
       }
     } catch (e) {
@@ -1772,6 +1831,7 @@ class _LineInputBodyState extends State<_LineInputBody> {
       if (mounted) {
         setState(() => _sending = false);
       }
+      _focusNode.requestFocus();
     }
   }
 
@@ -1837,41 +1897,68 @@ class _LineInputBodyState extends State<_LineInputBody> {
   void _clear() {
     widget.controller.clear();
     setState(() => _status = '');
+    _focusNode.requestFocus();
+  }
+
+  /// 履歴の 1 件を入力欄にロード (送信はしない)。
+  void _loadFromHistory(String text) {
+    widget.controller.text = text;
+    widget.controller.selection =
+        TextSelection.collapsed(offset: text.length);
+    _focusNode.requestFocus();
+  }
+
+  /// 機能キー (BS / DEL / TAB / ESC / INS / カーソル等) を 1 回押下する。
+  /// 履歴やテキストフィールドには影響せず、X68000 へ即座に送る。
+  Future<void> _pressFunctionKey(int scancode) async {
+    debugPrint('[LineInput] function key: scancode=0x'
+        '${scancode.toRadixString(16).padLeft(2, '0')}');
+    widget.midi.sendNoteOn(widget.channel, scancode, 127);
+    await Future.delayed(_intraKeyDelay);
+    widget.midi.sendNoteOff(widget.channel, scancode);
+    _focusNode.requestFocus();
   }
 
   @override
   Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final hintColor = colors.onSurface.withValues(alpha: 0.35);
     return SafeArea(
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            // 入力行
             TextField(
               controller: widget.controller,
+              focusNode: _focusNode,
               autofocus: true,
               enabled: !_sending,
-              decoration: const InputDecoration(
-                hintText: 'X68000 に送る文字列 (Enter または送信ボタン)',
-                border: OutlineInputBorder(),
+              decoration: InputDecoration(
+                hintText: 'X68000 に送る文字列 (Enter で送信、空 Enter で改行)',
+                hintStyle: TextStyle(color: hintColor),
+                border: const OutlineInputBorder(),
+                isDense: true,
               ),
               onSubmitted: (_) => _send(),
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 8),
+            // 送信 / クリア + ステータス
             Row(
               children: [
                 FilledButton.icon(
                   onPressed: _sending ? null : _send,
-                  icon: const Icon(Icons.send),
+                  icon: const Icon(Icons.send, size: 18),
                   label: const Text('送信'),
                 ),
                 const SizedBox(width: 8),
                 OutlinedButton.icon(
                   onPressed: _sending ? null : _clear,
-                  icon: const Icon(Icons.clear),
+                  icon: const Icon(Icons.clear, size: 18),
                   label: const Text('クリア'),
                 ),
-                const SizedBox(width: 16),
+                const SizedBox(width: 12),
                 Expanded(
                   child: Text(
                     _status,
@@ -1880,15 +1967,70 @@ class _LineInputBodyState extends State<_LineInputBody> {
                 ),
               ],
             ),
-            const SizedBox(height: 16),
-            const Text(
-              '・大文字 (A-Z) と JIS 記号 (! " # 等) は SHIFT を自動付与して送信します。\n'
-              '・全角 ASCII (Ａ-Ｚ / ０-９ / 全角記号) は半角に正規化してから送ります。\n'
-              '・漢字 / かな / 半角カナ等は X68000 の「コード入力」モード経由で SJIS の\n'
-              '  16-bit code を 4 桁 hex で送信します (X68000 のキーボード LED に注目)。\n'
-              '・送信前に CAPS / かな / ローマ字 / コード入力 / 全角 / ひらがな / INS が\n'
-              '  点灯していれば自動的にオフへ戻します (このモードに入ってから観測した範囲)。',
-              style: TextStyle(color: Colors.grey, fontSize: 12),
+            const SizedBox(height: 8),
+            // 機能キー (BS / DEL / TAB / ESC / INS / HOME / CLR / カーソル)
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: [
+                for (final fk in _functionKeys)
+                  OutlinedButton(
+                    style: OutlinedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 10),
+                      minimumSize: const Size(40, 32),
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                    onPressed: _sending
+                        ? null
+                        : () => _pressFunctionKey(fk.scancode),
+                    child: Text(fk.label,
+                        style: const TextStyle(fontSize: 12)),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            // 履歴一覧 (タップでロード、送信はしない)
+            Expanded(
+              child: Container(
+                decoration: BoxDecoration(
+                  border: Border.all(color: colors.outlineVariant),
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: widget.history.isEmpty
+                    ? Center(
+                        child: Text(
+                          '送信履歴はここに表示されます (タップで入力欄にロード)',
+                          style: TextStyle(color: hintColor, fontSize: 12),
+                        ),
+                      )
+                    : ListView.builder(
+                        itemCount: widget.history.length,
+                        itemBuilder: (ctx, i) {
+                          final item = widget.history[i];
+                          return InkWell(
+                            onTap: () => _loadFromHistory(item),
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 12, vertical: 6),
+                              child: Row(
+                                children: [
+                                  Icon(Icons.history,
+                                      size: 14, color: hintColor),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Text(
+                                      item,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(fontSize: 13),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+              ),
             ),
           ],
         ),
