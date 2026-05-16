@@ -18,6 +18,19 @@ on:
           - ios
           - macos
           - windows
+      ios_distribution:
+        description: 'iOS distribution method'
+        required: true
+        default: 'ad-hoc'
+        type: choice
+        options:
+          - ad-hoc
+          - app-store-connect
+      upload_testflight:
+        description: 'Upload iOS IPA to App Store Connect for TestFlight'
+        required: true
+        default: false
+        type: boolean
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
@@ -177,7 +190,13 @@ jobs:
       IOS_CERTIFICATE_BASE64: ${{ secrets.IOS_CERTIFICATE_BASE64 }}
       IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
       IOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
+      IOS_APP_STORE_PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_APP_STORE_PROVISIONING_PROFILE_BASE64 }}
       KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+      IOS_DISTRIBUTION_METHOD: ${{ github.event.inputs.ios_distribution || 'ad-hoc' }}
+      UPLOAD_TESTFLIGHT: ${{ github.event.inputs.upload_testflight || 'false' }}
+      APPSTORE_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
+      APPSTORE_KEY_ID: ${{ secrets.APPSTORE_KEY_ID }}
+      APPSTORE_PRIVATE_KEY: ${{ secrets.APPSTORE_PRIVATE_KEY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -200,12 +219,41 @@ jobs:
         run: |
           set -euo pipefail
 
-          for name in APPLE_TEAM_ID IOS_CERTIFICATE_BASE64 IOS_CERTIFICATE_PASSWORD IOS_PROVISIONING_PROFILE_BASE64 KEYCHAIN_PASSWORD; do
+          for name in APPLE_TEAM_ID IOS_CERTIFICATE_BASE64 IOS_CERTIFICATE_PASSWORD KEYCHAIN_PASSWORD; do
             if [ -z "${!name:-}" ]; then
               echo "::error::GitHub Secret ${name} is required for iOS archive export"
               exit 1
             fi
           done
+
+          if [ "${IOS_DISTRIBUTION_METHOD}" = "app-store-connect" ]; then
+            if [ -z "${IOS_APP_STORE_PROVISIONING_PROFILE_BASE64:-}" ]; then
+              echo "::error::GitHub Secret IOS_APP_STORE_PROVISIONING_PROFILE_BASE64 is required for App Store Connect export"
+              exit 1
+            fi
+            PROFILE_BASE64="${IOS_APP_STORE_PROVISIONING_PROFILE_BASE64}"
+            EXPORT_METHOD="app-store-connect"
+          else
+            if [ -z "${IOS_PROVISIONING_PROFILE_BASE64:-}" ]; then
+              echo "::error::GitHub Secret IOS_PROVISIONING_PROFILE_BASE64 is required for Ad Hoc export"
+              exit 1
+            fi
+            PROFILE_BASE64="${IOS_PROVISIONING_PROFILE_BASE64}"
+            EXPORT_METHOD="ad-hoc"
+          fi
+
+          if [ "${UPLOAD_TESTFLIGHT}" = "true" ]; then
+            if [ "${IOS_DISTRIBUTION_METHOD}" != "app-store-connect" ]; then
+              echo "::error::upload_testflight=true requires ios_distribution=app-store-connect"
+              exit 1
+            fi
+            for name in APPSTORE_ISSUER_ID APPSTORE_KEY_ID APPSTORE_PRIVATE_KEY; do
+              if [ -z "${!name:-}" ]; then
+                echo "::error::GitHub Secret ${name} is required to upload to App Store Connect"
+                exit 1
+              fi
+            done
+          fi
 
           CERTIFICATE_PATH="${RUNNER_TEMP}/ios-signing.p12"
           PP_PATH="${RUNNER_TEMP}/ios-profile.mobileprovision"
@@ -213,7 +261,7 @@ jobs:
           mkdir -p "${HOME}/Library/MobileDevice/Provisioning Profiles"
 
           echo "${IOS_CERTIFICATE_BASE64}" | base64 --decode > "${CERTIFICATE_PATH}"
-          echo "${IOS_PROVISIONING_PROFILE_BASE64}" | base64 --decode > "${PP_PATH}"
+          echo "${PROFILE_BASE64}" | base64 --decode > "${PP_PATH}"
 
           security create-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
           security set-keychain-settings -lut 21600 "${KEYCHAIN_PATH}"
@@ -229,6 +277,7 @@ jobs:
           {
             echo "IOS_PROFILE_UUID=${PROFILE_UUID}"
             echo "IOS_PROFILE_NAME=${PROFILE_NAME}"
+            echo "IOS_EXPORT_METHOD=${EXPORT_METHOD}"
           } >> "${GITHUB_ENV}"
 
       - name: Generate ExportOptions.plist
@@ -241,7 +290,7 @@ jobs:
           <plist version="1.0">
           <dict>
             <key>method</key>
-            <string>ad-hoc</string>
+            <string>${IOS_EXPORT_METHOD}</string>
             <key>signingStyle</key>
             <string>manual</string>
             <key>signingCertificate</key>
@@ -292,6 +341,23 @@ jobs:
           IPA=$(find build/ios/ipa -name '*.ipa' -type f | head -n 1)
           cp "${IPA}" "dist/MimicX_ios-${{ needs.prepare.outputs.app_version }}.ipa"
           ditto -c -k --sequesterRsrc --keepParent build/ios/archive/Runner.xcarchive "dist/MimicX_ios-${{ needs.prepare.outputs.app_version }}.xcarchive.zip"
+
+      - name: Upload iOS IPA to App Store Connect
+        if: env.UPLOAD_TESTFLIGHT == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${HOME}/.appstoreconnect/private_keys"
+          KEY_PATH="${HOME}/.appstoreconnect/private_keys/AuthKey_${APPSTORE_KEY_ID}.p8"
+          printf '%s' "${APPSTORE_PRIVATE_KEY}" > "${KEY_PATH}"
+          chmod 600 "${KEY_PATH}"
+
+          IPA=$(find build/ios/ipa -name '*.ipa' -type f | head -n 1)
+          xcrun altool --upload-app \
+            -f "${IPA}" \
+            -t ios \
+            --apiKey "${APPSTORE_KEY_ID}" \
+            --apiIssuer "${APPSTORE_ISSUER_ID}"
 
       - name: Upload iOS artifacts
         uses: actions/upload-artifact@v7

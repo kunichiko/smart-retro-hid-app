@@ -119,6 +119,13 @@ iOS の ad-hoc archive export には次の Secrets が必要:
 - `IOS_PROVISIONING_PROFILE_BASE64`
 - `KEYCHAIN_PASSWORD`
 
+TestFlight / App Store Connect へアップロードする場合は、追加で次の Secrets が必要:
+
+- `IOS_APP_STORE_PROVISIONING_PROFILE_BASE64`
+- `APPSTORE_ISSUER_ID`
+- `APPSTORE_KEY_ID`
+- `APPSTORE_PRIVATE_KEY`
+
 macOS の署名証明書を使う場合は次の Secrets を追加する:
 
 - `MACOS_CERTIFICATE_BASE64`
