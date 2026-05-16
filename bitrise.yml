@@ -48,6 +48,14 @@ workflows:
     - deploy-to-bitrise-io@2:
         inputs:
         - deploy_path: "$BITRISE_SIGNED_APK_PATH"
+    - script@1:
+        title: Upload APK to GitHub Releases
+        inputs:
+        - content: |-
+            #!/usr/bin/env bash
+            set -euo pipefail
+            cd "$BITRISE_FLUTTER_PROJECT_LOCATION"
+            bash ./scripts/upload-to-github-release.sh "$BITRISE_SIGNED_APK_PATH"
   _build_ios:
     steps:
     - script@1:
@@ -152,6 +160,14 @@ workflows:
     - deploy-to-bitrise-io@2:
         inputs:
         - deploy_path: "$APP_ZIP_PATH"
+    - script@1:
+        title: Upload macOS zip to GitHub Releases
+        inputs:
+        - content: |-
+            #!/usr/bin/env bash
+            set -euo pipefail
+            cd "$BITRISE_FLUTTER_PROJECT_LOCATION"
+            bash ./scripts/upload-to-github-release.sh "$APP_ZIP_PATH"
   build_all:
     before_run:
     - _checkout
